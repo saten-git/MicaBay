@@ -579,7 +579,7 @@ class NotchWindow(QWidget):
             self.compact_bar.hide()
             self.shelf_widget.hide()
             self.dashboard_widget.show()
-            self._animate_size(760, 450)
+            self._animate_size(760, 480)
 
         elif state == "SHELF":
             self.compact_bar.hide()

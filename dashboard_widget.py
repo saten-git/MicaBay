@@ -67,8 +67,8 @@ class DashboardWidget(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 12, 16, 14)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(16, 10, 16, 12)
+        main_layout.setSpacing(8)
 
         # -------------------------------------------------------------
         # 1. Header Bar (MicaBay Dashboard Header)
@@ -150,13 +150,14 @@ class DashboardWidget(QWidget):
         self.edit_btn.setToolTip("Customize Dashboard")
         self.edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.edit_btn.setStyleSheet(btn_style)
+        self.edit_btn.clicked.connect(self._show_settings)
 
         self.settings_btn = QPushButton("⚙️")
         self.settings_btn.setFixedSize(28, 28)
         self.settings_btn.setToolTip("Settings")
         self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings_btn.setStyleSheet(btn_style)
-        self.settings_btn.clicked.connect(self.settings_requested.emit)
+        self.settings_btn.clicked.connect(self._show_settings)
 
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(28, 28)
@@ -788,20 +789,20 @@ class DashboardWidget(QWidget):
         # 14 Dock Icons
         dock_spec = [
             ("⌂", "Home", self._show_home, True),
-            ("⚙️", "System", None, False),
-            ("📋", "Clipboard", None, False),
-            ("📝", "Notes", None, False),
-            ("⏱️", "Focus", None, False),
-            ("📁", "Shelf", self.shelf_requested.emit, False),
-            ("🗄️", "Drawer", None, False),
-            ("⛅", "Weather", None, False),
-            ("🕒", "Clock", None, False),
-            ("📏", "Tools", None, False),
-            ("🔗", "Links", None, False),
-            ("🗂️", "Windows", None, False),
-            ("📊", "Screen Time", None, False),
+            ("⚙️", "System", self._show_settings, False),
+            ("📋", "Clipboard", self._on_clipboard_dock, False),
+            ("📝", "Notes", self._on_notes_dock, False),
+            ("⏱️", "Focus", self._on_focus_dock, False),
+            ("📁", "Shelf", self._on_shelf_dock, False),
+            ("🗄️", "Drawer", self._on_drawer_dock, False),
+            ("⛅", "Weather", self._on_weather_dock, False),
+            ("🕒", "Clock", self._on_clock_dock, False),
+            ("📏", "Tools", self._on_tools_dock, False),
+            ("🔗", "Links", self._on_links_dock, False),
+            ("🗂️", "Windows", self._on_windows_dock, False),
+            ("📊", "Screen Time", self._on_screentime_dock, False),
             ("|", "Separator", None, False),
-            ("+", "Add", None, False)
+            ("+", "Add", self._on_add_dock, False)
         ]
 
         self.dock_buttons = {}
@@ -853,7 +854,7 @@ class DashboardWidget(QWidget):
 
     def _create_card(self):
         card = QFrame()
-        card.setFixedHeight(136)
+        card.setFixedHeight(130)
         card.setStyleSheet("""
             QFrame {
                 background: #111114;
@@ -863,10 +864,152 @@ class DashboardWidget(QWidget):
         """)
         return card
 
+    def _set_active_dock_button(self, active_name: str):
+        self.active_dock_name = active_name
+        for name, btn in self.dock_buttons.items():
+            if name == active_name:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: #ffffff;
+                        color: #0c0c0e;
+                        border-radius: 10px;
+                        font-size: 15px;
+                        font-weight: 800;
+                    }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: transparent;
+                        color: #7a7a85;
+                        border-radius: 10px;
+                        font-size: 13px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(255, 255, 255, 0.12);
+                        color: #ffffff;
+                    }
+                """)
+
+    def _flash_dock_button(self, name: str):
+        if name in self.dock_buttons:
+            btn = self.dock_buttons[name]
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(0, 210, 255, 0.35);
+                    color: #00d2ff;
+                    border: 1px solid #00d2ff;
+                    border-radius: 10px;
+                    font-size: 14px;
+                    font-weight: 800;
+                }
+            """)
+            QTimer.singleShot(400, lambda: self._set_active_dock_button(getattr(self, "active_dock_name", "Home")))
+
+    def _flash_card(self, card_widget):
+        if not card_widget:
+            return
+        orig_style = """
+            QFrame {
+                background: #111114;
+                border: 1px solid rgba(255, 255, 255, 0.07);
+                border-radius: 16px;
+            }
+        """
+        flash_style = """
+            QFrame {
+                background: #15151c;
+                border: 1.5px solid #00d2ff;
+                border-radius: 16px;
+            }
+        """
+        card_widget.setStyleSheet(flash_style)
+        QTimer.singleShot(500, lambda: card_widget.setStyleSheet(orig_style))
+
     def _show_home(self):
         self.content_stack.setCurrentWidget(self.cards_page)
-        if "Home" in self.dock_buttons:
-            self.dock_buttons["Home"].setStyleSheet("background: #ffffff; color: #0c0c0e; border-radius: 10px; font-size: 15px; font-weight: 800;")
+        self.home_btn.setText("Home")
+        now_dt = datetime.now()
+        self.date_lbl.setText(now_dt.strftime("%A, %d %b").replace(" 0", " "))
+        self._set_active_dock_button("Home")
+
+    def _show_settings(self):
+        self.content_stack.setCurrentWidget(self.settings_page)
+        self.home_btn.setText("Settings")
+        self.date_lbl.setText("Appearance & Customization")
+        self._set_active_dock_button("System")
+
+    def _on_clipboard_dock(self):
+        self._show_home()
+        self._flash_card(self.card_notes)
+        self._open_clipboard_win_v()
+        self._flash_dock_button("Clipboard")
+
+    def _on_notes_dock(self):
+        self._show_home()
+        self._flash_card(self.card_notes)
+        self.note_input.setFocus()
+        self.note_input.selectAll()
+        self._flash_dock_button("Notes")
+
+    def _on_focus_dock(self):
+        self._show_home()
+        if self.prod_stack.currentIndex() != 0:
+            self._toggle_prod_mode()
+        self._toggle_focus()
+        self._flash_card(self.card_focus)
+        self._flash_dock_button("Focus")
+
+    def _on_shelf_dock(self):
+        self._flash_dock_button("Shelf")
+        self.shelf_requested.emit()
+
+    def _on_drawer_dock(self):
+        self._show_home()
+        self._flash_card(self.card_actions)
+        self._flash_dock_button("Drawer")
+
+    def _on_weather_dock(self):
+        self._show_home()
+        self._flash_card(self.card_weather)
+        if self.weather_service:
+            self.weather_service.fetch()
+        self._flash_dock_button("Weather")
+
+    def _on_clock_dock(self):
+        self._show_home()
+        if self.prod_stack.currentIndex() != 1:
+            self._toggle_prod_mode()
+        self._toggle_stopwatch()
+        self._flash_card(self.card_focus)
+        self._flash_dock_button("Clock")
+
+    def _on_tools_dock(self):
+        self._flash_dock_button("Tools")
+        self._launch_app("calc.exe")
+
+    def _on_links_dock(self):
+        self._flash_dock_button("Links")
+        self._launch_app("powershell.exe")
+
+    def _on_windows_dock(self):
+        self._flash_dock_button("Windows")
+        self._launch_app("taskmgr.exe")
+
+    def _on_screentime_dock(self):
+        self._show_home()
+        self._toggle_c1_mode()
+        self._flash_card(self.card_screen)
+        self._flash_dock_button("Screen Time")
+
+    def _on_add_dock(self):
+        self._show_home()
+        self._flash_card(self.card_notes)
+        if self.note_input.text().strip():
+            self._save_note()
+        else:
+            self.note_input.setFocus()
+        self._flash_dock_button("Add")
 
     def _toggle_focus(self):
         self.focus_running = not self.focus_running
@@ -894,7 +1037,12 @@ class DashboardWidget(QWidget):
     def _save_note(self):
         text = self.note_input.text().strip()
         if text:
-            self.note_status.setText(text)
+            new_item = {"title": f"Note · {text[:35]}", "time": "Just now"}
+            if hasattr(self, "_current_clip_items"):
+                self._current_clip_items.insert(0, new_item)
+            else:
+                self._current_clip_items = [new_item, {"title": "Image · 1041 × 162", "time": "29m"}]
+            self._render_clip_items(self._current_clip_items)
             self.note_input.clear()
 
     def _on_stats_updated(self, stats: dict):
@@ -1113,11 +1261,11 @@ class DashboardWidget(QWidget):
 
     def _populate_mock_clipboard(self):
         # Initial clipboard items matching screenshot
-        mock_items = [
+        self._current_clip_items = [
             {"title": "Image · 1041 × 162", "time": "29m"},
             {"title": "Image · 583 × 342", "time": "29m"}
         ]
-        self._render_clip_items(mock_items)
+        self._render_clip_items(self._current_clip_items)
 
     def _render_clip_items(self, items: list):
         while self.clip_list_layout.count():
