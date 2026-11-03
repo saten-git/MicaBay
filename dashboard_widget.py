@@ -46,7 +46,7 @@ class DashboardWidget(QWidget):
         main_layout.setSpacing(10)
 
         # -------------------------------------------------------------
-        # 1. Header Bar (Matches Exact Vayli Screenshot)
+        # 1. Header Bar (MicaBay Dashboard Header)
         # -------------------------------------------------------------
         header_layout = QHBoxLayout()
         header_layout.setSpacing(8)
@@ -409,7 +409,7 @@ class DashboardWidget(QWidget):
         main_layout.addWidget(self.content_stack)
 
         # -------------------------------------------------------------
-        # 3. Bottom Floating Dock (Exact Vayli Screenshot Icons)
+        # 3. Bottom Floating Dock (MicaBay Floating Dock)
         # -------------------------------------------------------------
         dock_container = QHBoxLayout()
         dock_pill = QFrame()
