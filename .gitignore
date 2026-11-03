@@ -1,0 +1,20 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & IDEs
+.vscode/
+.idea/
+venv/
+.env
+
+# Windows thumbnail & temporary files
+Thumbs.db
+ehthumbs.db
+*.tmp
+*.log
+
+# Local runtime data / caches
+weather_cache.json
+screentime.json
