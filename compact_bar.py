@@ -15,14 +15,37 @@ class CompactClickRedirector(QObject):
         self.compact_bar = compact_bar
 
     def eventFilter(self, obj, ev):
-        if ev.type() == QEvent.Type.MouseButtonPress:
+        t = ev.type()
+        if t == QEvent.Type.MouseButtonPress:
             if ev.button() == Qt.MouseButton.LeftButton:
                 if getattr(obj, "_is_interactive_control", False):
                     return False
                 notch = self.compact_bar.window()
+                if hasattr(notch, "current_state") and notch.current_state in ("EXPANDED", "SHELF"):
+                    notch.collapse()
+                    return True
                 if hasattr(notch, "expand_dashboard"):
                     notch.expand_dashboard()
                     return True
+        elif t == QEvent.Type.DragEnter:
+            if ev.mimeData().hasUrls():
+                ev.acceptProposedAction()
+                notch = self.compact_bar.window()
+                if hasattr(notch, "dragEnterEvent"):
+                    notch.dragEnterEvent(ev)
+                return True
+        elif t == QEvent.Type.DragMove:
+            if ev.mimeData().hasUrls():
+                ev.acceptProposedAction()
+                notch = self.compact_bar.window()
+                if hasattr(notch, "dragMoveEvent"):
+                    notch.dragMoveEvent(ev)
+                return True
+        elif t == QEvent.Type.Drop:
+            notch = self.compact_bar.window()
+            if hasattr(notch, "dropEvent"):
+                notch.dropEvent(ev)
+                return True
         return False
 
 class CompactBar(QWidget):
@@ -30,10 +53,14 @@ class CompactBar(QWidget):
 
     def __init__(self, parent=None, weather_service=None, media_service=None):
         super().__init__(parent)
+        self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.weather_service = weather_service
         self.media_service = media_service
-        self.placement = "top"
+        if parent and hasattr(parent, "settings_service"):
+            self.placement = parent.settings_service.get("placement", "full_taskbar")
+        else:
+            self.placement = "full_taskbar"
         self.weather_visible = True
         self.raw_media_title = ""
         self.max_boundary_x = 505
@@ -41,8 +68,11 @@ class CompactBar(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        if self.placement in ("taskbar", "full_taskbar"):
+            layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.stack = QStackedWidget(self)
+        self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Smooth cross-fade transition effect
         self._fade_effect = QGraphicsOpacityEffect(self.stack)
@@ -153,6 +183,8 @@ class CompactBar(QWidget):
         # Left stretch: active in Top / Pill mode; hidden in Full Taskbar mode to flow left-to-right!
         self.m_left_stretch = QWidget()
         self.m_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.m_left_stretch.setVisible(False)
         m_layout.addWidget(self.m_left_stretch)
 
         m_layout.addWidget(self.media_weather_widget)
@@ -198,9 +230,15 @@ class CompactBar(QWidget):
         # -------------------------------------------------------------
         self.toast_page = QWidget()
         t_layout = QHBoxLayout(self.toast_page)
-        t_layout.setContentsMargins(4, 0, 4, 0)
+        t_layout.setContentsMargins(12, 0, 12, 0)
         t_layout.setSpacing(6)
-        t_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        t_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.t_left_stretch = QWidget()
+        self.t_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.t_left_stretch.setVisible(False)
+        t_layout.addWidget(self.t_left_stretch)
 
         self.toast_icon = QLabel("📋")
         self.toast_icon.setStyleSheet("font-size: 13px; background: transparent;")
@@ -212,10 +250,12 @@ class CompactBar(QWidget):
             background: transparent;
         """)
 
-        t_layout.addStretch()
         t_layout.addWidget(self.toast_icon)
         t_layout.addWidget(self.toast_text)
-        t_layout.addStretch()
+
+        self.t_right_stretch = QWidget()
+        self.t_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        t_layout.addWidget(self.t_right_stretch)
         self.stack.addWidget(self.toast_page)
 
         # -------------------------------------------------------------
@@ -225,11 +265,13 @@ class CompactBar(QWidget):
         i_layout = QHBoxLayout(self.idle_page)
         i_layout.setContentsMargins(12, 0, 12, 0)
         i_layout.setSpacing(6)
-        i_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        i_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
         # Left stretch for centering in Top / Pill mode; hidden in Full Taskbar mode
         self.i_left_stretch = QWidget()
         self.i_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.i_left_stretch.setVisible(False)
         i_layout.addWidget(self.i_left_stretch)
 
         self.idle_weather_icon = QLabel("🌙☁️")
@@ -305,9 +347,15 @@ class CompactBar(QWidget):
         # -------------------------------------------------------------
         self.volume_page = QWidget()
         v_layout = QHBoxLayout(self.volume_page)
-        v_layout.setContentsMargins(6, 0, 6, 0)
+        v_layout.setContentsMargins(10, 0, 10, 0)
         v_layout.setSpacing(8)
-        v_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        v_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.v_left_stretch = QWidget()
+        self.v_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.v_left_stretch.setVisible(False)
+        v_layout.addWidget(self.v_left_stretch)
 
         self.vol_icon = QLabel("🔊")
         self.vol_icon.setStyleSheet("font-size: 12px; background: transparent;")
@@ -323,11 +371,13 @@ class CompactBar(QWidget):
             background: transparent;
         """)
 
-        v_layout.addStretch()
         v_layout.addWidget(self.vol_icon)
         v_layout.addWidget(self.vol_bar)
         v_layout.addWidget(self.vol_pct_lbl)
-        v_layout.addStretch()
+
+        self.v_right_stretch = QWidget()
+        self.v_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        v_layout.addWidget(self.v_right_stretch)
         self.stack.addWidget(self.volume_page)
 
         # -------------------------------------------------------------
@@ -336,8 +386,15 @@ class CompactBar(QWidget):
         self.download_page = QWidget()
         dl_layout = QHBoxLayout(self.download_page)
         dl_layout.setContentsMargins(10, 0, 10, 0)
-        dl_layout.setSpacing(7)
-        dl_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        dl_layout.setSpacing(6)
+        dl_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        # Left stretch: active in Top / Pill mode; hidden in Full Taskbar mode to flow left-most!
+        self.dl_left_stretch = QWidget()
+        self.dl_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.dl_left_stretch.setVisible(False)
+        dl_layout.addWidget(self.dl_left_stretch)
 
         self.dl_icon = QLabel("📥")
         self.dl_icon.setStyleSheet("font-size: 13px; background: transparent;")
@@ -350,13 +407,18 @@ class CompactBar(QWidget):
 
         self.dl_info_lbl = QLabel("0 MB/s")
         self.dl_info_lbl.setStyleSheet("color: #00d2ff; font-size: 11px; font-weight: 600; background: transparent;")
+        self.dl_info_lbl.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
 
-        dl_layout.addStretch()
         dl_layout.addWidget(self.dl_icon)
         dl_layout.addWidget(self.dl_name_lbl)
         dl_layout.addWidget(self.dl_sep)
         dl_layout.addWidget(self.dl_info_lbl)
-        dl_layout.addStretch()
+
+        # Right stretch absorbs extra space
+        self.dl_right_stretch = QWidget()
+        self.dl_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        dl_layout.addWidget(self.dl_right_stretch)
+
         self.stack.addWidget(self.download_page)
 
         # -------------------------------------------------------------
@@ -366,7 +428,13 @@ class CompactBar(QWidget):
         mic_layout = QHBoxLayout(self.mic_page)
         mic_layout.setContentsMargins(10, 0, 10, 0)
         mic_layout.setSpacing(6)
-        mic_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        mic_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.mic_left_stretch = QWidget()
+        self.mic_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.mic_left_stretch.setVisible(False)
+        mic_layout.addWidget(self.mic_left_stretch)
 
         self.mic_dot = QLabel("●")
         self.mic_dot.setStyleSheet("color: #00d2ff; font-size: 9px; background: transparent;")
@@ -377,11 +445,13 @@ class CompactBar(QWidget):
         self.mic_text_lbl = QLabel("Microphone Active")
         self.mic_text_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
 
-        mic_layout.addStretch()
         mic_layout.addWidget(self.mic_dot)
         mic_layout.addWidget(self.mic_icon)
         mic_layout.addWidget(self.mic_text_lbl)
-        mic_layout.addStretch()
+
+        self.mic_right_stretch = QWidget()
+        self.mic_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        mic_layout.addWidget(self.mic_right_stretch)
         self.stack.addWidget(self.mic_page)
 
         # -------------------------------------------------------------
@@ -391,7 +461,13 @@ class CompactBar(QWidget):
         ba_layout = QHBoxLayout(self.battery_alert_page)
         ba_layout.setContentsMargins(10, 0, 10, 0)
         ba_layout.setSpacing(6)
-        ba_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+        ba_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.ba_left_stretch = QWidget()
+        self.ba_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.ba_left_stretch.setVisible(False)
+        ba_layout.addWidget(self.ba_left_stretch)
 
         self.ba_icon = QLabel("⚡")
         self.ba_icon.setStyleSheet("font-size: 13px; background: transparent;")
@@ -399,10 +475,12 @@ class CompactBar(QWidget):
         self.ba_text_lbl = QLabel("Charger Connected")
         self.ba_text_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
 
-        ba_layout.addStretch()
         ba_layout.addWidget(self.ba_icon)
         ba_layout.addWidget(self.ba_text_lbl)
-        ba_layout.addStretch()
+
+        self.ba_right_stretch = QWidget()
+        self.ba_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        ba_layout.addWidget(self.ba_right_stretch)
         self.stack.addWidget(self.battery_alert_page)
 
         # -------------------------------------------------------------
@@ -411,11 +489,13 @@ class CompactBar(QWidget):
         self.greeting_page = QWidget()
         g_layout = QHBoxLayout(self.greeting_page)
         g_layout.setContentsMargins(14, 0, 14, 0)
-        g_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        g_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
         # Left stretch: active in Top / Pill mode; hidden in Full Taskbar mode to flow left-to-right!
         self.g_left_stretch = QWidget()
         self.g_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.g_left_stretch.setVisible(False)
         g_layout.addWidget(self.g_left_stretch)
 
         self.greeting_lbl = QLabel("")
@@ -445,14 +525,240 @@ class CompactBar(QWidget):
 
         self.stack.addWidget(self.greeting_page)
 
+        # -------------------------------------------------------------
+        # 9. Net Speed Page (↓ 4.8 MB/s  ↑ 820 KB/s)
+        # -------------------------------------------------------------
+        self.net_speed_page = QWidget()
+        ns_layout = QHBoxLayout(self.net_speed_page)
+        ns_layout.setContentsMargins(12, 0, 12, 0)
+        ns_layout.setSpacing(6)
+        ns_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.net_left_stretch = QWidget()
+        self.net_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.net_left_stretch.setVisible(False)
+        ns_layout.addWidget(self.net_left_stretch)
+
+        self.net_down_icon = QLabel("↓")
+        self.net_down_icon.setStyleSheet("color: #00d2ff; font-size: 12px; font-weight: 800; background: transparent;")
+
+        self.net_down_lbl = QLabel("0 KB/s")
+        self.net_down_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        self.net_sep = QLabel("|")
+        self.net_sep.setStyleSheet("color: #4a4a54; font-size: 11px; font-weight: 500;")
+
+        self.net_up_icon = QLabel("↑")
+        self.net_up_icon.setStyleSheet("color: #00d2ff; font-size: 12px; font-weight: 800; background: transparent;")
+
+        self.net_up_lbl = QLabel("0 KB/s")
+        self.net_up_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        ns_layout.addWidget(self.net_down_icon)
+        ns_layout.addWidget(self.net_down_lbl)
+        ns_layout.addWidget(self.net_sep)
+        ns_layout.addWidget(self.net_up_icon)
+        ns_layout.addWidget(self.net_up_lbl)
+
+        self.net_right_stretch = QWidget()
+        self.net_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        ns_layout.addWidget(self.net_right_stretch)
+
+        self.stack.addWidget(self.net_speed_page)
+
+        # -------------------------------------------------------------
+        # 10. CPU and RAM Page (💻 CPU 24% | RAM 62%)
+        # -------------------------------------------------------------
+        self.cpu_ram_page = QWidget()
+        cr_layout = QHBoxLayout(self.cpu_ram_page)
+        cr_layout.setContentsMargins(12, 0, 12, 0)
+        cr_layout.setSpacing(6)
+        cr_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.cpu_ram_left_stretch = QWidget()
+        self.cpu_ram_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.cpu_ram_left_stretch.setVisible(False)
+        cr_layout.addWidget(self.cpu_ram_left_stretch)
+
+        self.cpu_icon = QLabel("💻")
+        self.cpu_icon.setStyleSheet("font-size: 12px; background: transparent;")
+
+        self.cpu_lbl = QLabel("CPU 0%")
+        self.cpu_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        self.cpu_ram_sep = QLabel("|")
+        self.cpu_ram_sep.setStyleSheet("color: #4a4a54; font-size: 11px; font-weight: 500;")
+
+        self.ram_lbl = QLabel("RAM 0%")
+        self.ram_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        cr_layout.addWidget(self.cpu_icon)
+        cr_layout.addWidget(self.cpu_lbl)
+        cr_layout.addWidget(self.cpu_ram_sep)
+        cr_layout.addWidget(self.ram_lbl)
+
+        self.cpu_ram_right_stretch = QWidget()
+        self.cpu_ram_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        cr_layout.addWidget(self.cpu_ram_right_stretch)
+
+        self.stack.addWidget(self.cpu_ram_page)
+
+        # -------------------------------------------------------------
+        # 11. Weather & Temperature Page (⛅ 24°C | Partly Cloudy)
+        # -------------------------------------------------------------
+        self.weather_page = QWidget()
+        wp_layout = QHBoxLayout(self.weather_page)
+        wp_layout.setContentsMargins(12, 0, 12, 0)
+        wp_layout.setSpacing(6)
+        wp_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.w_left_stretch = QWidget()
+        self.w_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.w_left_stretch.setVisible(False)
+        wp_layout.addWidget(self.w_left_stretch)
+
+        self.w_icon_lbl = QLabel("🌙☁️")
+        self.w_icon_lbl.setStyleSheet("font-size: 12px; background: transparent;")
+
+        self.w_temp_lbl = QLabel("22°C")
+        self.w_temp_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 700; background: transparent;")
+
+        self.w_sep = QLabel("|")
+        self.w_sep.setStyleSheet("color: #4a4a54; font-size: 11px; font-weight: 500;")
+
+        self.w_cond_lbl = QLabel("Partly cloudy")
+        self.w_cond_lbl.setStyleSheet("color: #9a9ab0; font-size: 11px; font-weight: 600; background: transparent;")
+
+        wp_layout.addWidget(self.w_icon_lbl)
+        wp_layout.addWidget(self.w_temp_lbl)
+        wp_layout.addWidget(self.w_sep)
+        wp_layout.addWidget(self.w_cond_lbl)
+
+        self.w_right_stretch = QWidget()
+        self.w_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        wp_layout.addWidget(self.w_right_stretch)
+
+        self.stack.addWidget(self.weather_page)
+
+        # -------------------------------------------------------------
+        # 12. Date & Day Page (📅 Tuesday | 03 November)
+        # -------------------------------------------------------------
+        self.date_page = QWidget()
+        dp_layout = QHBoxLayout(self.date_page)
+        dp_layout.setContentsMargins(12, 0, 12, 0)
+        dp_layout.setSpacing(6)
+        dp_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.date_left_stretch = QWidget()
+        self.date_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.date_left_stretch.setVisible(False)
+        dp_layout.addWidget(self.date_left_stretch)
+
+        self.date_icon_lbl = QLabel("📅")
+        self.date_icon_lbl.setStyleSheet("font-size: 12px; background: transparent;")
+
+        self.date_day_lbl = QLabel("Tuesday")
+        self.date_day_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 700; background: transparent;")
+
+        self.date_sep = QLabel("|")
+        self.date_sep.setStyleSheet("color: #4a4a54; font-size: 11px; font-weight: 500;")
+
+        self.date_full_lbl = QLabel("03 November")
+        self.date_full_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        dp_layout.addWidget(self.date_icon_lbl)
+        dp_layout.addWidget(self.date_day_lbl)
+        dp_layout.addWidget(self.date_sep)
+        dp_layout.addWidget(self.date_full_lbl)
+
+        self.date_right_stretch = QWidget()
+        self.date_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        dp_layout.addWidget(self.date_right_stretch)
+
+        self.stack.addWidget(self.date_page)
+
+        # -------------------------------------------------------------
+        # 13. Notifications Page (🔔 3 Unread or 🔔 No notifications)
+        # -------------------------------------------------------------
+        self.notification_page = QWidget()
+        np_layout = QHBoxLayout(self.notification_page)
+        np_layout.setContentsMargins(12, 0, 12, 0)
+        np_layout.setSpacing(6)
+        np_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.notif_left_stretch = QWidget()
+        self.notif_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.notif_left_stretch.setVisible(False)
+        np_layout.addWidget(self.notif_left_stretch)
+
+        self.notif_icon_lbl = QLabel("🔔")
+        self.notif_icon_lbl.setStyleSheet("font-size: 12px; background: transparent;")
+
+        self.notif_text_lbl = QLabel("No notifications")
+        self.notif_text_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        np_layout.addWidget(self.notif_icon_lbl)
+        np_layout.addWidget(self.notif_text_lbl)
+
+        self.notif_right_stretch = QWidget()
+        self.notif_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        np_layout.addWidget(self.notif_right_stretch)
+
+        self.stack.addWidget(self.notification_page)
+
+        # -------------------------------------------------------------
+        # 14. Real-time Notification Toast Page (💬 Telegram · John: Message)
+        # -------------------------------------------------------------
+        self.notification_toast_page = QWidget()
+        nt_layout = QHBoxLayout(self.notification_toast_page)
+        nt_layout.setContentsMargins(10, 0, 10, 0)
+        nt_layout.setSpacing(6)
+        nt_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        self.nt_left_stretch = QWidget()
+        self.nt_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        if self.placement in ("taskbar", "full_taskbar"):
+            self.nt_left_stretch.setVisible(False)
+        nt_layout.addWidget(self.nt_left_stretch)
+
+        self.nt_icon_lbl = QLabel("💬")
+        self.nt_icon_lbl.setStyleSheet("font-size: 13px; background: transparent;")
+
+        self.nt_app_lbl = QLabel("Telegram")
+        self.nt_app_lbl.setStyleSheet("color: #00d2ff; font-size: 11px; font-weight: 700; background: transparent;")
+
+        self.nt_sep = QLabel("·")
+        self.nt_sep.setStyleSheet("color: #7a7a88; font-size: 11px; font-weight: 600;")
+
+        self.nt_msg_lbl = QLabel("")
+        self.nt_msg_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        nt_layout.addWidget(self.nt_icon_lbl)
+        nt_layout.addWidget(self.nt_app_lbl)
+        nt_layout.addWidget(self.nt_sep)
+        nt_layout.addWidget(self.nt_msg_lbl)
+
+        self.nt_right_stretch = QWidget()
+        self.nt_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        nt_layout.addWidget(self.nt_right_stretch)
+
+        self.stack.addWidget(self.notification_toast_page)
+
         layout.addWidget(self.stack)
 
-        # Install click redirector on stack and all children so clicking ANY pixel opens dashboard
+        # Install click & drag redirector on stack and all children so interacting anywhere works
+        self.stack.setAcceptDrops(True)
         self._click_filter = CompactClickRedirector(self)
         self.installEventFilter(self._click_filter)
         self.stack.installEventFilter(self._click_filter)
         for child in self.findChildren(QWidget):
             child.setCursor(Qt.CursorShape.PointingHandCursor)
+            child.setAcceptDrops(True)
             child.installEventFilter(self._click_filter)
 
         self.clock_timer = QTimer(self)
@@ -480,6 +786,7 @@ class CompactBar(QWidget):
             child = event.child()
             if child and child.isWidgetType():
                 child.setCursor(Qt.CursorShape.PointingHandCursor)
+                child.setAcceptDrops(True)
                 child.installEventFilter(self._click_filter)
         super().childEvent(event)
 
@@ -492,6 +799,24 @@ class CompactBar(QWidget):
                 return
         super().mousePressEvent(event)
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            notch = self.window()
+            if hasattr(notch, "open_shelf"):
+                notch.open_shelf()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        notch = self.window()
+        if hasattr(notch, "dropEvent"):
+            notch.dropEvent(event)
+        else:
+            event.acceptProposedAction()
+
     def update_weather(self, data: dict):
         self.current_weather_data = data
         icon = data.get("icon", "🌙☁️")
@@ -502,6 +827,11 @@ class CompactBar(QWidget):
         self.idle_weather_icon.setText(icon)
         self.idle_weather_temp.setText(temp)
         self.idle_weather_cond.setText(f"{cond} · {humid}" if humid else cond)
+
+        if hasattr(self, "w_icon_lbl"):
+            self.w_icon_lbl.setText(icon)
+            self.w_temp_lbl.setText(temp)
+            self.w_cond_lbl.setText(cond)
 
         self._apply_media_weather_text()
 
@@ -529,7 +859,7 @@ class CompactBar(QWidget):
 
     def set_weather_visible(self, visible: bool):
         self.weather_visible = visible
-        self.media_weather_widget.setVisible(visible)
+        self.media_weather_widget.setVisible(False)
         self.idle_weather_icon.setVisible(visible)
         self.idle_weather_temp.setVisible(visible)
         self.idle_weather_cond.setVisible(visible)
@@ -539,19 +869,31 @@ class CompactBar(QWidget):
             self.update_elastic_layout(self.max_boundary_x)
 
     def set_placement(self, placement: str):
-        if getattr(self, "placement", None) == placement:
-            return
         self.placement = placement
+        is_tb = (placement in ("taskbar", "full_taskbar"))
         is_full_tb = (placement == "full_taskbar")
-        self.m_left_stretch.setVisible(not is_full_tb)
-        self.i_left_stretch.setVisible(not is_full_tb)
-        if hasattr(self, "g_left_stretch"):
-            self.g_left_stretch.setVisible(not is_full_tb)
-        if not is_full_tb:
-            self.media_clock_widget.setVisible(False)
-            self.media_battery_widget.setVisible(False)
-            self.idle_clock_widget.setVisible(True)
-            self.idle_battery_widget.setVisible(True)
+        if hasattr(self, "layout") and self.layout():
+            if is_tb:
+                self.layout().setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            else:
+                self.layout().setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        for stretch_name in (
+            "m_left_stretch", "i_left_stretch", "dl_left_stretch", "g_left_stretch",
+            "net_left_stretch", "cpu_ram_left_stretch", "w_left_stretch",
+            "date_left_stretch", "notif_left_stretch", "nt_left_stretch",
+            "t_left_stretch", "v_left_stretch", "mic_left_stretch", "ba_left_stretch"
+        ):
+            st = getattr(self, stretch_name, None)
+            if st:
+                st.setVisible(not is_tb)
+
+        # Media stays completely clean: no weather, no clock, no battery around it
+        self.media_weather_widget.setVisible(False)
+        self.media_clock_widget.setVisible(False)
+        self.media_battery_widget.setVisible(False)
+        self.idle_clock_widget.setVisible(True)
+        self.idle_battery_widget.setVisible(True)
 
     def _finish_elastic(self, optimal_w: int) -> int:
         if optimal_w != getattr(self, "_last_elastic_w", -1):
@@ -562,96 +904,53 @@ class CompactBar(QWidget):
     def update_elastic_layout(self, max_boundary_x: int = 505) -> int:
         """
         Dynamically fits elements from left to right.
-        If something strikes the Start button boundary, removes/halts it so it fits
-        whatever can fit cleanly without any collision.
-        Returns the optimal elastic width for the window.
+        Reserves a generous safety buffer before the Start button (max_boundary_x - 36),
+        strictly halting any overlap.
         """
         self.max_boundary_x = max_boundary_x
         if getattr(self, "placement", "top") != "full_taskbar":
             return self.width()
 
         current_widget = self.stack.currentWidget()
-        # Safe barrier: reserve 14px before the Start button so it never collides
-        safe_max_w = max(240, max_boundary_x - 14)
+        # Safe barrier: reserve 36px buffer before the Start button so it never collides
+        safe_max_w = max(200, max_boundary_x - 36)
+        self.setFixedWidth(safe_max_w)
+        self.stack.setMinimumWidth(0)
+        self.stack.setMaximumWidth(safe_max_w)
+        self.stack.setFixedWidth(safe_max_w)
 
         if current_widget == self.media_page or (hasattr(self, "media_page") and self.stack.currentWidget() is None):
+            # Clean Media Page: nothing to left or right of media
+            self.media_weather_widget.setVisible(False)
+            self.media_clock_widget.setVisible(False)
+            self.media_battery_widget.setVisible(False)
+
             pad_left = 10
+            pad_right = 10
             spacing = 7
             cur_x = pad_left
 
-            # 1. Weather badge
-            if getattr(self, "weather_visible", True):
-                self.media_weather_widget.setVisible(True)
-                cur_x += self.media_weather_widget.sizeHint().width() + spacing
-            else:
-                self.media_weather_widget.setVisible(False)
-
-            # 2. Thumbnail
+            # 1. Thumbnail
             self.thumb_lbl.setVisible(True)
             cur_x += 20 + spacing
 
-            # 3. Equalizer width
+            # 2. Equalizer & Play button
             w_eq = 18
+            w_play = 16
 
-            # Measurements for Clock and Battery
-            w_clock = self.media_clock_widget.sizeHint().width()
-            w_battery = self.media_battery_widget.sizeHint().width()
+            fixed_w = cur_x + spacing + w_eq + spacing + w_play + pad_right
+            avail_title = max(50, safe_max_w - fixed_w)
 
             raw_title = getattr(self, "raw_media_title", "") or "Playing Media"
             fm = QFontMetrics(self.title_lbl.font())
             full_title_w = fm.horizontalAdvance(raw_title)
 
-            MIN_TITLE_W = 95
-            PREF_TITLE_W = 160
-
-            # Test 1: Does (Title >= PREF_TITLE_W + EQ + Clock + Battery) fit within safe_max_w?
-            space_with_both = cur_x + min(full_title_w, PREF_TITLE_W) + spacing + w_eq + spacing + w_clock + spacing + w_battery + 12
-            if space_with_both <= safe_max_w:
-                self.media_clock_widget.setVisible(True)
-                self.media_battery_widget.setVisible(True)
-
-                # Title can expand further if extra space is available
-                fixed_rest = cur_x + spacing + w_eq + spacing + w_clock + spacing + w_battery + 12
-                avail_title = max(MIN_TITLE_W, safe_max_w - fixed_rest)
-                title_w = min(full_title_w, avail_title)
-                elided = fm.elidedText(raw_title, Qt.TextElideMode.ElideRight, title_w)
-                self.title_lbl.setText(elided)
-
-                optimal_w = cur_x + title_w + spacing + w_eq + spacing + w_clock + spacing + w_battery + 12
-                optimal_w = min(optimal_w, safe_max_w)
-                return self._finish_elastic(optimal_w)
-
-            # Test 2: Battery strikes Start button! Remove & halt Battery.
-            # Does (Title >= MIN_TITLE_W + EQ + Clock) fit?
-            space_with_clock = cur_x + min(full_title_w, MIN_TITLE_W) + spacing + w_eq + spacing + w_clock + 12
-            if space_with_clock <= safe_max_w:
-                self.media_clock_widget.setVisible(True)
-                self.media_battery_widget.setVisible(False)
-
-                fixed_rest = cur_x + spacing + w_eq + spacing + w_clock + 12
-                avail_title = max(MIN_TITLE_W, safe_max_w - fixed_rest)
-                title_w = min(full_title_w, avail_title)
-                elided = fm.elidedText(raw_title, Qt.TextElideMode.ElideRight, title_w)
-                self.title_lbl.setText(elided)
-
-                optimal_w = cur_x + title_w + spacing + w_eq + spacing + w_clock + 12
-                optimal_w = min(optimal_w, safe_max_w)
-                return self._finish_elastic(optimal_w)
-
-            # Test 3: Clock also strikes Start button! Remove & halt Clock too!
-            # Title gets available space, truncated with ellipsis before Start button
-            self.media_clock_widget.setVisible(False)
-            self.media_battery_widget.setVisible(False)
-
-            fixed_rest = cur_x + spacing + w_eq + 12
-            avail_title = max(50, safe_max_w - fixed_rest)
             title_w = min(full_title_w, avail_title)
             elided = fm.elidedText(raw_title, Qt.TextElideMode.ElideRight, title_w)
             self.title_lbl.setText(elided)
-
-            optimal_w = cur_x + title_w + spacing + w_eq + 12
-            optimal_w = min(optimal_w, safe_max_w)
-            return self._finish_elastic(optimal_w)
+            self.title_lbl.setMinimumWidth(0)
+            self.title_lbl.setMaximumWidth(title_w)
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.idle_page:
             pad = 12
@@ -671,40 +970,95 @@ class CompactBar(QWidget):
             if (pad + w_weather + spacing + w_clock + spacing + w_battery + pad) <= safe_max_w:
                 self.idle_clock_widget.setVisible(True)
                 self.idle_battery_widget.setVisible(True)
-                optimal_w = min(pad + w_weather + spacing + w_clock + spacing + w_battery + pad, safe_max_w)
-                return self._finish_elastic(optimal_w)
             # Test 2: Drop battery?
             elif (pad + w_weather + spacing + w_clock + pad) <= safe_max_w:
                 self.idle_clock_widget.setVisible(True)
                 self.idle_battery_widget.setVisible(False)
-                optimal_w = min(pad + w_weather + spacing + w_clock + pad, safe_max_w)
-                return self._finish_elastic(optimal_w)
             else:
                 self.idle_clock_widget.setVisible(False)
                 self.idle_battery_widget.setVisible(False)
-                optimal_w = min(pad + w_weather + pad, safe_max_w)
-                return self._finish_elastic(optimal_w)
+
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.download_page:
-            w_dl = 26 + self.dl_name_lbl.sizeHint().width() + 12 + self.dl_info_lbl.sizeHint().width() + 24
-            return self._finish_elastic(min(w_dl, safe_max_w))
+            pad_left = 10
+            pad_right = 10
+            spacing = 6
+            cur_x = pad_left
+
+            # 1. Download icon
+            cur_x += self.dl_icon.sizeHint().width() + spacing
+
+            # 2. Separator
+            w_sep = self.dl_sep.sizeHint().width()
+
+            # 3. Download Info (e.g. "710 MB · 1.5 MB/s") - MUST NEVER BE CROPPED!
+            info_txt = getattr(self, "raw_download_info", "") or self.dl_info_lbl.text()
+            fm_info = QFontMetrics(self.dl_info_lbl.font())
+            w_info = max(self.dl_info_lbl.minimumWidth(), fm_info.horizontalAdvance(info_txt) + 8)
+            self.dl_info_lbl.setMinimumWidth(w_info)
+
+            # Fixed space excluding filename
+            fixed_w = cur_x + spacing + w_sep + spacing + w_info + pad_right
+            avail_name = max(40, safe_max_w - fixed_w)
+
+            # 4. Download Filename (elided cleanly if needed)
+            raw_name = getattr(self, "raw_download_filename", "") or self.dl_name_lbl.text()
+            fm_name = QFontMetrics(self.dl_name_lbl.font())
+            full_name_w = fm_name.horizontalAdvance(raw_name)
+
+            name_w = min(full_name_w, avail_name)
+            elided_name = fm_name.elidedText(raw_name, Qt.TextElideMode.ElideRight, name_w)
+            self.dl_name_lbl.setText(elided_name)
+            self.dl_name_lbl.setMinimumWidth(0)
+            self.dl_name_lbl.setMaximumWidth(name_w)
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.mic_page:
-            w_mic = 32 + self.mic_text_lbl.sizeHint().width() + 24
-            return self._finish_elastic(min(w_mic, safe_max_w))
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.battery_alert_page:
-            w_ba = 26 + self.ba_text_lbl.sizeHint().width() + 24
-            return self._finish_elastic(min(w_ba, safe_max_w))
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.toast_page:
-            w_toast = 24 + self.toast_text.sizeHint().width() + 24
-            return self._finish_elastic(min(w_toast, safe_max_w))
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.volume_page:
-            return self._finish_elastic(min(260, safe_max_w))
+            return self._finish_elastic(safe_max_w)
 
         elif current_widget == self.greeting_page:
+            return self._finish_elastic(safe_max_w)
+
+        elif current_widget == getattr(self, "net_speed_page", None):
+            return self._finish_elastic(safe_max_w)
+
+        elif current_widget == getattr(self, "cpu_ram_page", None):
+            return self._finish_elastic(safe_max_w)
+
+        elif current_widget == getattr(self, "weather_page", None):
+            return self._finish_elastic(safe_max_w)
+
+        elif current_widget == getattr(self, "date_page", None):
+            return self._finish_elastic(safe_max_w)
+
+        elif current_widget == getattr(self, "notification_page", None):
+            return self._finish_elastic(safe_max_w)
+
+        elif current_widget == getattr(self, "notification_toast_page", None):
+            pad = 20
+            w_icon = 18
+            w_app = self.nt_app_lbl.sizeHint().width()
+            w_sep = 10
+            fixed = pad + w_icon + 6 + w_app + w_sep
+            avail_msg = max(80, safe_max_w - fixed)
+            fm = QFontMetrics(self.nt_msg_lbl.font())
+            raw_msg = self.nt_msg_lbl.text()
+            full_msg_w = fm.horizontalAdvance(raw_msg)
+            msg_w = min(full_msg_w, avail_msg)
+            elided = fm.elidedText(raw_msg, Qt.TextElideMode.ElideRight, msg_w)
+            self.nt_msg_lbl.setText(elided)
+            self.nt_msg_lbl.setMinimumWidth(0)
+            self.nt_msg_lbl.setMaximumWidth(msg_w)
             return self._finish_elastic(safe_max_w)
 
         return self._finish_elastic(safe_max_w)
@@ -715,6 +1069,9 @@ class CompactBar(QWidget):
         self.time_lbl.setText(formatted_time)
         if hasattr(self, "media_time_lbl"):
             self.media_time_lbl.setText(formatted_time)
+        if hasattr(self, "date_day_lbl"):
+            self.date_day_lbl.setText(now.strftime("%A"))
+            self.date_full_lbl.setText(now.strftime("%d %B"))
 
     def _on_play_clicked(self):
         if getattr(self, "media_service", None):
@@ -735,6 +1092,9 @@ class CompactBar(QWidget):
             self._fade_anim.start()
 
     def show_media(self, display_text: str, thumb_bytes: bytes, is_playing: bool):
+        self.media_weather_widget.setVisible(False)
+        self.media_clock_widget.setVisible(False)
+        self.media_battery_widget.setVisible(False)
         self.raw_media_title = display_text or "Playing Media"
 
         if getattr(self, "placement", "top") == "full_taskbar":
@@ -777,8 +1137,13 @@ class CompactBar(QWidget):
             self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
 
     def show_download(self, filename: str, size_mb: float, speed_str: str):
+        self.raw_download_filename = filename
+        self.raw_download_info = f"{size_mb} MB · {speed_str}"
         self.dl_name_lbl.setText(filename)
-        self.dl_info_lbl.setText(f"{size_mb} MB · {speed_str}")
+        self.dl_info_lbl.setText(self.raw_download_info)
+        fm_info = QFontMetrics(self.dl_info_lbl.font())
+        w_info = fm_info.horizontalAdvance(self.raw_download_info) + 8
+        self.dl_info_lbl.setMinimumWidth(w_info)
         self._fade_to_page(self.download_page)
         if getattr(self, "placement", "top") == "full_taskbar":
             self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
@@ -829,5 +1194,69 @@ class CompactBar(QWidget):
         self.greeting_lbl.setText(text)
         if self.stack.currentWidget() != self.greeting_page:
             self.stack.setCurrentWidget(self.greeting_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def show_net_speed(self, down_str: str, up_str: str):
+        self.update_net_speed_data(down_str, up_str)
+        self._fade_to_page(self.net_speed_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def update_net_speed_data(self, down_str: str, up_str: str):
+        if hasattr(self, "net_down_lbl"):
+            self.net_down_lbl.setText(down_str or "0 KB/s")
+            self.net_up_lbl.setText(up_str or "0 KB/s")
+
+    def show_cpu_ram(self, cpu_pct: int, ram_pct: int):
+        self.update_cpu_ram_data(cpu_pct, ram_pct)
+        self._fade_to_page(self.cpu_ram_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def update_cpu_ram_data(self, cpu_pct: int, ram_pct: int):
+        if hasattr(self, "cpu_lbl"):
+            self.cpu_lbl.setText(f"CPU {int(cpu_pct)}%")
+            self.ram_lbl.setText(f"RAM {int(ram_pct)}%")
+
+    def show_weather_page(self, temp_str: str, cond_str: str, icon_str: str):
+        if hasattr(self, "w_temp_lbl"):
+            self.w_temp_lbl.setText(temp_str or "22°C")
+            self.w_cond_lbl.setText(cond_str or "Partly cloudy")
+            self.w_icon_lbl.setText(icon_str or "🌙☁️")
+        self._fade_to_page(self.weather_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def update_weather_page_data(self, data: dict):
+        if hasattr(self, "w_temp_lbl") and data:
+            self.w_temp_lbl.setText(data.get("temp_str", "22°C"))
+            self.w_cond_lbl.setText(data.get("condition", "Partly cloudy"))
+            self.w_icon_lbl.setText(data.get("icon", "🌙☁️"))
+
+    def show_date_page(self):
+        self._tick_clock()
+        self._fade_to_page(self.date_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def show_notification_page(self, count: int, display_text: str):
+        self.update_notification_data(count, display_text)
+        self._fade_to_page(self.notification_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def update_notification_data(self, count: int, display_text: str):
+        if hasattr(self, "notif_text_lbl"):
+            if count > 0:
+                self.notif_text_lbl.setText(f"{count} Unread")
+            else:
+                self.notif_text_lbl.setText("No notifications")
+
+    def show_notification_toast(self, app: str, message: str, icon: str = "💬"):
+        self.nt_icon_lbl.setText(icon or "💬")
+        self.nt_app_lbl.setText(app or "Notification")
+        self.nt_msg_lbl.setText(message or "")
+        self._fade_to_page(self.notification_toast_page)
         if getattr(self, "placement", "top") == "full_taskbar":
             self.update_elastic_layout(getattr(self, "max_boundary_x", 505))

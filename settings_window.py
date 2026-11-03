@@ -578,6 +578,65 @@ class SettingsWindow(QWidget):
         layout.addLayout(self._create_toggle_setting("GPU Utilization Monitoring", "Poll native 3D engine utilization percentage", "enable_gpu_monitor", True))
         layout.addLayout(self._create_toggle_setting("Network Throughput Monitoring", "Track live upload and download bandwidth rates", "enable_net_monitor", True))
 
+        layout.addSpacing(6)
+
+        # -------------------------------------------------------------
+        # 4. SMART LIVE PILL ROTATION
+        # -------------------------------------------------------------
+        layout.addWidget(self._create_section_label("SMART LIVE PILL ROTATION"))
+
+        rot_row = QHBoxLayout()
+        rv = QVBoxLayout()
+        rv.setSpacing(2)
+        rt = QLabel("Rotation Interval")
+        rt.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
+        rs = QLabel("Automatic duration before advancing to the next rotating feature")
+        rs.setStyleSheet("color: #8e8e93; font-size: 11px;")
+        rv.addWidget(rt)
+        rv.addWidget(rs)
+
+        rot_seg = QFrame()
+        rot_seg.setStyleSheet("background: #1c1c1f; border-radius: 8px; padding: 2px;")
+        rs_layout = QHBoxLayout(rot_seg)
+        rs_layout.setContentsMargins(2, 2, 2, 2)
+        rs_layout.setSpacing(2)
+
+        dur_buttons = {}
+        durations = [("3s", 3), ("5s", 5), ("8s", 8), ("10s", 10)]
+        curr_dur = self.settings_service.get("rotation_interval_sec", 5)
+
+        def set_duration(val):
+            self.settings_service.set("rotation_interval_sec", val)
+            for d_val, b in dur_buttons.items():
+                if d_val == val:
+                    b.setStyleSheet("background: #323238; color: #ffffff; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; padding: 0 10px;")
+                else:
+                    b.setStyleSheet("background: transparent; color: #8e8e93; font-size: 11px; font-weight: 500; border-radius: 6px; border: none; padding: 0 10px;")
+
+        for label, sec in durations:
+            b = QPushButton(label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFixedHeight(26)
+            if sec == curr_dur:
+                b.setStyleSheet("background: #323238; color: #ffffff; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; padding: 0 10px;")
+            else:
+                b.setStyleSheet("background: transparent; color: #8e8e93; font-size: 11px; font-weight: 500; border-radius: 6px; border: none; padding: 0 10px;")
+            b.clicked.connect(lambda _, s=sec: set_duration(s))
+            dur_buttons[sec] = b
+            rs_layout.addWidget(b)
+
+        rot_row.addLayout(rv)
+        rot_row.addStretch()
+        rot_row.addWidget(rot_seg)
+        layout.addLayout(rot_row)
+
+        layout.addLayout(self._create_toggle_setting("Real-time Notification Alerts", "Display incoming Telegram, WhatsApp & system messages directly on pill for 5 seconds", "enable_notification_alerts", True))
+        layout.addLayout(self._create_toggle_setting("Time & Battery Status", "Display current system time, weather, and battery percentage", "enable_time_battery_pill", True))
+        layout.addLayout(self._create_toggle_setting("Live Internet Speed", "Show upload and download throughput (↓/↑ MB/s or KB/s)", "enable_net_speed_pill", True))
+        layout.addLayout(self._create_toggle_setting("CPU & RAM Usage", "Display real-time CPU and memory load percentages", "enable_cpu_ram_pill", False))
+        layout.addLayout(self._create_toggle_setting("Standalone Weather Page", "Rotate dedicated weather slide (already integrated in media and time)", "enable_weather_pill", False))
+        layout.addLayout(self._create_toggle_setting("Current Date & Day", "Display local day of the week and full calendar date", "enable_date_pill", False))
+
         layout.addStretch()
         scroll.setWidget(content)
         return scroll

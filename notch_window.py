@@ -16,10 +16,14 @@ from shelf_widget import FileShelfWidget
 from settings_window import SettingsWindow
 from color_extractor import extract_dominant_color
 
-COMPACT_STATES = ("MEDIA", "IDLE", "COPY_TOAST", "VOLUME_HUD", "DOWNLOAD", "MIC_ACTIVE", "BATTERY_ALERT", "GREETING")
+COMPACT_STATES = (
+    "MEDIA", "IDLE", "COPY_TOAST", "VOLUME_HUD", "DOWNLOAD",
+    "MIC_ACTIVE", "BATTERY_ALERT", "GREETING", "NOTIFICATION_TOAST",
+    "NET_SPEED", "CPU_RAM", "WEATHER", "DATE", "NOTIFICATIONS"
+)
 
 class NotchWindow(QWidget):
-    def __init__(self, media_service, clipboard_service, system_service, settings_service, volume_service, weather_service=None):
+    def __init__(self, media_service, clipboard_service, system_service, settings_service, volume_service, weather_service=None, notification_service=None):
         super().__init__()
         self.media_service = media_service
         self.clipboard_service = clipboard_service
@@ -27,8 +31,9 @@ class NotchWindow(QWidget):
         self.settings_service = settings_service
         self.volume_service = volume_service
         self.weather_service = weather_service
+        self.notification_service = notification_service
 
-        # States: "MEDIA", "COPY_TOAST", "VOLUME_HUD", "IDLE", "EXPANDED", "SHELF"
+        # States: "MEDIA", "COPY_TOAST", "VOLUME_HUD", "IDLE", "EXPANDED", "SHELF", "NOTIFICATION_TOAST", "NET_SPEED"
         self.current_state = "IDLE"
         self.previous_compact_state = "IDLE"
         self.is_pinned = False
@@ -76,9 +81,21 @@ class NotchWindow(QWidget):
         self.battery_alert_timer.timeout.connect(self._end_battery_alert)
         self.battery_alert_data = {"title": "Charger Connected", "is_charging": True, "pct": 100}
 
+        # Real-time incoming notification toast timer (holds for 5 seconds)
+        self.notification_toast_timer = QTimer(self)
+        self.notification_toast_timer.setSingleShot(True)
+        self.notification_toast_timer.timeout.connect(self._end_notification_toast)
+
         # Activity states
         self.download_data = {"active": False}
         self.mic_data = {"active": False}
+        self.system_stats = {}
+        self.notification_data = {"count": 0, "display_text": "No notifications"}
+        if self.notification_service:
+            try:
+                self.notification_data = self.notification_service.get_data()
+            except Exception:
+                pass
 
         # Media & Download rotation timer (alternates every 5s when both active)
         self.rotation_timer = QTimer(self)
@@ -119,6 +136,17 @@ class NotchWindow(QWidget):
 
         self._last_expand_time = 0.0
 
+        # Automatic focus loss & outside click detector for expanded dashboard
+        self.outside_click_timer = QTimer(self)
+        self.outside_click_timer.setInterval(75)  # Responsive 75ms check
+        self.outside_click_timer.timeout.connect(self._check_expanded_focus_loss)
+
+        # Persistent topmost keeper timer (ensures Live Pill stays above Windows Taskbar Shell_TrayWnd)
+        self.topmost_keeper_timer = QTimer(self)
+        self.topmost_keeper_timer.setInterval(400)  # Responsive 400ms assertion
+        self.topmost_keeper_timer.timeout.connect(self._tick_topmost_keeper)
+        self.topmost_keeper_timer.start()
+
         self._init_window()
         self._build_components()
         self._connect_signals()
@@ -142,7 +170,10 @@ class NotchWindow(QWidget):
                 ctypes.windll.wtsapi32.WTSRegisterSessionNotification(int(self.winId()), 0)
             except Exception:
                 pass
-            QTimer.singleShot(100, self._start_greeting)
+            self._greeting_startup_timer = QTimer(self)
+            self._greeting_startup_timer.setSingleShot(True)
+            self._greeting_startup_timer.timeout.connect(self._start_greeting)
+            self._greeting_startup_timer.start(100)
 
     def _init_window(self):
         self.setWindowFlags(
@@ -154,16 +185,51 @@ class NotchWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptDrops(True)
+
+        # Allow UIPI messages for Drag & Drop from Windows Explorer
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.ChangeWindowMessageFilter(0x0233, 1)  # WM_DROPFILES
+            user32.ChangeWindowMessageFilter(0x004A, 1)  # WM_COPYDATA
+            user32.ChangeWindowMessageFilter(0x0049, 1)  # WM_COPYGLOBALDATA
+            if hasattr(user32, "ChangeWindowMessageFilterEx"):
+                hwnd = int(self.winId())
+                user32.ChangeWindowMessageFilterEx(hwnd, 0x0233, 1, None)
+                user32.ChangeWindowMessageFilterEx(hwnd, 0x004A, 1, None)
+                user32.ChangeWindowMessageFilterEx(hwnd, 0x0049, 1, None)
+        except Exception:
+            pass
 
     def _ensure_topmost(self):
         """Re-asserts topmost z-order over Windows Shell_TrayWnd taskbar without taking focus."""
         try:
             import ctypes
+            import ctypes.wintypes
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [
+                ctypes.wintypes.HWND,
+                ctypes.wintypes.HWND,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                ctypes.c_uint
+            ]
+            user32.SetWindowPos.restype = ctypes.wintypes.BOOL
             hwnd = int(self.winId())
-            # HWND_TOPMOST = -1
+
+            # Attach ownership to Shell_TrayWnd if on taskbar so Windows User32 naturally keeps it above
+            placement = self.settings_service.get("placement", "top")
+            if placement in ("taskbar", "full_taskbar") and not getattr(self, "_has_set_tray_owner", False):
+                tray_hwnd = user32.FindWindowW("Shell_TrayWnd", None)
+                if tray_hwnd:
+                    SetWindowLongPtr = user32.SetWindowLongPtrW if hasattr(user32, "SetWindowLongPtrW") else user32.SetWindowLongW
+                    SetWindowLongPtr(hwnd, -8, tray_hwnd)  # GWLP_HWNDPARENT = -8
+                    self._has_set_tray_owner = True
+
+            HWND_TOPMOST = ctypes.wintypes.HWND(-1)
             # SWP_NOSIZE (0x0001) | SWP_NOMOVE (0x0002) | SWP_NOACTIVATE (0x0010) | SWP_SHOWWINDOW (0x0040)
-            ctypes.windll.user32.SetWindowPos(
-                hwnd, -1, 0, 0, 0, 0,
+            user32.SetWindowPos(
+                hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                 0x0001 | 0x0002 | 0x0010 | 0x0040
             )
         except Exception:
@@ -186,6 +252,7 @@ class NotchWindow(QWidget):
         self.settings_window = SettingsWindow(self.settings_service)
 
         self.shelf_widget = FileShelfWidget(self)
+        self.shelf_widget.close_requested.connect(self.collapse)
         self.shelf_widget.hide()
 
     def _connect_signals(self):
@@ -200,23 +267,72 @@ class NotchWindow(QWidget):
         self.compact_bar.elastic_size_requested.connect(self._on_elastic_size_requested)
         if self.weather_service:
             self.weather_service.weather_updated.connect(self._on_weather_updated)
+        if self.notification_service:
+            self.notification_service.notifications_updated.connect(self._on_notifications_updated)
+            self.notification_service.notification_toast_requested.connect(self._on_new_notification)
+
+    def _on_new_notification(self, notif: dict):
+        if not self.settings_service.get("enable_notification_alerts", True):
+            return
+        if self.current_state in ("EXPANDED", "SHELF"):
+            return
+
+        if self.current_state in COMPACT_STATES and self.current_state != "NOTIFICATION_TOAST":
+            self.previous_compact_state = self.current_state
+
+        app_name = notif.get("app", "Notification")
+        title = notif.get("title", "")
+        body = notif.get("body", "")
+        if title and title != app_name:
+            msg_text = f"{title}: {body}" if body else title
+        else:
+            msg_text = body or notif.get("display_text", "New message")
+
+        icon = notif.get("icon", "💬")
+
+        # 1. Update toast UI first so currentWidget is notification_toast_page
+        self.compact_bar.show_notification_toast(app_name, msg_text, icon)
+
+        # 2. Switch window state to NOTIFICATION_TOAST
+        self._switch_state("NOTIFICATION_TOAST")
+
+        # 3. Halt rotation timer during notification toast so nothing overrides it
+        if hasattr(self, "rotation_timer") and self.rotation_timer.isActive():
+            self.rotation_timer.stop()
+
+        # 4. Directly display incoming notification for guaranteed full 5 seconds
+        self.notification_toast_timer.start(5000)
+
+    def _end_notification_toast(self):
+        if self.current_state == "NOTIFICATION_TOAST":
+            fallback = self.previous_compact_state if hasattr(self, "previous_compact_state") and self.previous_compact_state in COMPACT_STATES else self._get_active_fallback_state()
+            self._switch_state(fallback)
+            self._update_rotation_timer()
 
     def _on_elastic_size_requested(self, optimal_w: int):
         if self.settings_service.get("placement", "top") == "full_taskbar":
-            if self.current_state in COMPACT_STATES:
-                if int(self.cur_w) != optimal_w:
-                    self._animate_size(optimal_w, 42)
+            return
+        if self.current_state in COMPACT_STATES:
+            if int(self.cur_w) != optimal_w:
+                self._animate_size(optimal_w, 42)
 
     def _on_weather_updated(self, data: dict):
+        self.weather_data = data
+        self.compact_bar.update_weather(data)
+        if self.current_state == "WEATHER":
+            self.compact_bar.update_weather_page_data(data)
         self.update()
+
+    def _on_notifications_updated(self, data: dict):
+        self.notification_data = data
+        if self.current_state == "NOTIFICATIONS":
+            self.compact_bar.update_notification_data(data.get("count", 0), data.get("display_text", "No notifications"))
 
     def _get_scaled_width(self):
         placement = self.settings_service.get("placement", "top")
         if placement == "full_taskbar":
             max_b = self.settings_service.get("full_taskbar_width", 505)
-            if hasattr(self, "compact_bar"):
-                return self.compact_bar.update_elastic_layout(max_b)
-            return min(460, max_b - 14)
+            return max(200, max_b - 36)
         scale = self.settings_service.get("notch_scale", 90) / 100.0
         w_enabled = self.settings_service.get("weather_enabled", True)
         base = self.settings_service.get("pill_width", 270)
@@ -234,7 +350,12 @@ class NotchWindow(QWidget):
         self.update()
 
     def _on_stats_updated(self, stats: dict):
+        self.system_stats = stats
         self.compact_bar.update_battery(stats.get("battery", 95), stats.get("is_charging", False))
+        if self.current_state == "NET_SPEED":
+            self.compact_bar.update_net_speed_data(stats.get("net_down_str", "0 KB/s"), stats.get("net_up_str", "0 KB/s"))
+        elif self.current_state == "CPU_RAM":
+            self.compact_bar.update_cpu_ram_data(stats.get("cpu", 0), stats.get("ram", 0))
 
     def _on_volume_changed(self, pct: int, is_muted: bool):
         if not self.settings_service.get("enable_volume_hud", True) or getattr(self, "is_greeting_active", False):
@@ -253,18 +374,18 @@ class NotchWindow(QWidget):
             self._switch_state(self._get_active_fallback_state())
 
     def _on_battery_event(self, event: dict):
-        if not self.settings_service.get("enable_battery_alerts", True) or getattr(self, "is_greeting_active", False):
+        if not self.settings_service.get("enable_battery_alerts", True) or getattr(self, "is_greeting_active", False) or self.current_state == "NOTIFICATION_TOAST":
             return
         ev_type = event.get("type")
         pct = event.get("pct", 100)
         if ev_type == "charging_started":
             self.battery_alert_data = {"title": "Charger Connected", "is_charging": True, "pct": pct}
-            if self.current_state not in ("EXPANDED", "SHELF", "GREETING"):
+            if self.current_state not in ("EXPANDED", "SHELF", "GREETING", "NOTIFICATION_TOAST"):
                 self._switch_state("BATTERY_ALERT")
                 self.battery_alert_timer.start(3000)
         elif ev_type == "low_battery":
             self.battery_alert_data = {"title": "Low Battery Warning", "is_charging": False, "pct": pct}
-            if self.current_state not in ("EXPANDED", "SHELF", "GREETING"):
+            if self.current_state not in ("EXPANDED", "SHELF", "GREETING", "NOTIFICATION_TOAST"):
                 self._switch_state("BATTERY_ALERT")
                 self.battery_alert_timer.start(3500)
 
@@ -274,52 +395,62 @@ class NotchWindow(QWidget):
 
     def _on_download_activity_changed(self, dl_info: dict):
         self.download_data = dl_info
-        if not self.settings_service.get("enable_download_alerts", True) or getattr(self, "is_greeting_active", False):
+        if not self.settings_service.get("enable_download_alerts", True) or getattr(self, "is_greeting_active", False) or self.current_state == "NOTIFICATION_TOAST":
             return
         self._update_rotation_timer()
-        if self.current_state not in ("EXPANDED", "SHELF", "COPY_TOAST", "VOLUME_HUD", "BATTERY_ALERT", "GREETING"):
+        if self.current_state not in ("EXPANDED", "SHELF", "COPY_TOAST", "VOLUME_HUD", "BATTERY_ALERT", "GREETING", "NOTIFICATION_TOAST"):
             self._switch_state(self._get_active_fallback_state())
 
     def _on_mic_activity_changed(self, mic_info: dict):
         self.mic_data = mic_info
-        if not self.settings_service.get("enable_mic_indicator", True) or getattr(self, "is_greeting_active", False):
+        if not self.settings_service.get("enable_mic_indicator", True) or getattr(self, "is_greeting_active", False) or self.current_state == "NOTIFICATION_TOAST":
             return
-        if self.current_state not in ("EXPANDED", "SHELF", "COPY_TOAST", "VOLUME_HUD", "BATTERY_ALERT", "GREETING"):
+        if self.current_state not in ("EXPANDED", "SHELF", "COPY_TOAST", "VOLUME_HUD", "BATTERY_ALERT", "GREETING", "NOTIFICATION_TOAST"):
             self._switch_state(self._get_active_fallback_state())
 
     def _get_active_rotation_cycle(self) -> list:
+        cycle = []
         has_media = self.media_data.get("has_media", False)
         has_dl = self.download_data.get("active", False) and self.settings_service.get("enable_download_alerts", True)
-        
-        cycle = []
+
+        # Priority 2: Active tasks
         if has_media:
             cycle.append("MEDIA")
         if has_dl:
             cycle.append("DOWNLOAD")
-            
-        # When active activities (media or download) are running,
-        # rotate through them AND include IDLE (time, cloud info, battery) so all three rotate!
-        if cycle:
+
+        # Priority 3: Normal Live Pill info (Time & Battery + Live Net Speed)
+        # Note: CPU/RAM, Date, separate Weather, and Notification bell icon removed per user directive
+        if self.settings_service.get("enable_net_speed_pill", True):
+            cycle.append("NET_SPEED")
+        if self.settings_service.get("enable_time_battery_pill", True):
             cycle.append("IDLE")
-            
+
+        # Fallback if everything disabled: ensure at least IDLE is present
+        if not cycle:
+            cycle.append("IDLE")
+
         return cycle
 
     def _update_rotation_timer(self):
-        if getattr(self, "is_greeting_active", False):
+        if getattr(self, "is_greeting_active", False) or self.current_state in ("EXPANDED", "SHELF", "NOTIFICATION_TOAST"):
+            if hasattr(self, "rotation_timer") and self.rotation_timer.isActive():
+                self.rotation_timer.stop()
             return
         cycle = self._get_active_rotation_cycle()
+        interval_ms = int(self.settings_service.get("rotation_interval_sec", 5) * 1000)
         if len(cycle) >= 2:
-            if not self.rotation_timer.isActive():
-                self.rotation_timer.start(5000)  # Rotate every 5 seconds
+            if not self.rotation_timer.isActive() or self.rotation_timer.interval() != interval_ms:
+                self.rotation_timer.start(interval_ms)
         else:
             if self.rotation_timer.isActive():
                 self.rotation_timer.stop()
 
     def _rotate_media_download(self):
-        # Rotate between active activities and time/cloud/battery every 5 seconds
+        # Rotate between active activities and normal pill info every 5 seconds
         if getattr(self, "is_greeting_active", False):
             return
-        if self.current_state in ("EXPANDED", "SHELF", "VOLUME_HUD", "COPY_TOAST", "BATTERY_ALERT"):
+        if self.current_state in ("EXPANDED", "SHELF", "VOLUME_HUD", "COPY_TOAST", "BATTERY_ALERT", "NOTIFICATION_TOAST"):
             return
 
         cycle = self._get_active_rotation_cycle()
@@ -379,8 +510,12 @@ class NotchWindow(QWidget):
             self.greeting_hold_timer.start(5500)  # Hold on taskbar for at least 5.5 seconds once fully typed
 
     def _finish_greeting(self):
-        if not getattr(self, "is_greeting_active", False):
-            return
+        if hasattr(self, "_greeting_startup_timer") and self._greeting_startup_timer.isActive():
+            self._greeting_startup_timer.stop()
+        if hasattr(self, "typewriter_timer") and self.typewriter_timer.isActive():
+            self.typewriter_timer.stop()
+        if hasattr(self, "greeting_hold_timer") and self.greeting_hold_timer.isActive():
+            self.greeting_hold_timer.stop()
         self.is_greeting_active = False
         self._switch_state(self._get_active_fallback_state())
         self._update_rotation_timer()
@@ -406,6 +541,7 @@ class NotchWindow(QWidget):
                 idle_w = int(idle_base * (settings.get("notch_scale", 90) / 100.0))
                 self._animate_size(idle_w, 28)
         self._sync_layout()
+        self._update_rotation_timer()
         self.update()
 
     def _on_media_updated(self, data: dict):
@@ -418,7 +554,7 @@ class NotchWindow(QWidget):
         else:
             self.music_color = QColor(255, 255, 255)
 
-        if getattr(self, "is_greeting_active", False):
+        if getattr(self, "is_greeting_active", False) or self.current_state == "NOTIFICATION_TOAST":
             return
 
         self.compact_bar.show_media(
@@ -429,7 +565,7 @@ class NotchWindow(QWidget):
 
         self._update_rotation_timer()
 
-        if self.current_state not in ("EXPANDED", "COPY_TOAST", "VOLUME_HUD", "BATTERY_ALERT", "SHELF", "GREETING"):
+        if self.current_state not in ("EXPANDED", "COPY_TOAST", "VOLUME_HUD", "BATTERY_ALERT", "SHELF", "GREETING", "NOTIFICATION_TOAST"):
             self._switch_state(self._get_active_fallback_state())
             if self.settings_service.get("placement", "top") == "full_taskbar":
                 max_b = self.settings_service.get("full_taskbar_width", 505)
@@ -437,6 +573,8 @@ class NotchWindow(QWidget):
                 self._animate_size(optimal_w, 42)
 
     def _on_clipboard_copied(self, item: dict):
+        if self.current_state == "NOTIFICATION_TOAST":
+            return
         preview = item["preview"]
         is_img = (item.get("type") == "image")
         icon = "📸" if is_img else "📋"
@@ -456,6 +594,15 @@ class NotchWindow(QWidget):
 
     def _switch_state(self, state: str):
         self.current_state = state
+        if state in ("EXPANDED", "SHELF"):
+            if hasattr(self, "outside_click_timer") and not self.outside_click_timer.isActive():
+                self.outside_click_timer.start(75)
+        else:
+            if hasattr(self, "outside_click_timer") and self.outside_click_timer.isActive():
+                self.outside_click_timer.stop()
+            if self.settings_service.get("placement", "top") in ("taskbar", "full_taskbar"):
+                self._ensure_topmost()
+
         scale = self.settings_service.get("notch_scale", 90) / 100.0
         placement = self.settings_service.get("placement", "top")
         is_full_tb = (placement == "full_taskbar")
@@ -472,7 +619,9 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 target_w = self._get_scaled_width()
                 self._animate_size(target_w, 35)
@@ -485,7 +634,9 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 self._animate_size(int(250 * scale), 30)
 
@@ -497,7 +648,9 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 self._animate_size(int(240 * scale), 30)
 
@@ -514,7 +667,9 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 self._animate_size(int(260 * scale), 32)
 
@@ -526,7 +681,9 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 self._animate_size(int(240 * scale), 30)
 
@@ -543,9 +700,24 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 self._animate_size(int(250 * scale), 30)
+
+        elif state == "NOTIFICATION_TOAST":
+            self.compact_bar.show()
+            self.dashboard_widget.hide()
+            self.shelf_widget.hide()
+            if is_full_tb:
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                full_w = self.compact_bar.update_elastic_layout(max_b)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
+            else:
+                self._animate_size(int(280 * scale), 32)
 
         elif state == "GREETING":
             self.compact_bar.show()
@@ -554,7 +726,9 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 fm = self.compact_bar.greeting_lbl.fontMetrics()
                 w_greet = fm.horizontalAdvance(getattr(self, "greeting_full_text", "Good morning")) + 60
@@ -568,12 +742,95 @@ class NotchWindow(QWidget):
             if is_full_tb:
                 max_b = self.settings_service.get("full_taskbar_width", 505)
                 full_w = self.compact_bar.update_elastic_layout(max_b)
-                self._animate_size(full_w, 42)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
             else:
                 w_enabled = self.settings_service.get("weather_enabled", True)
                 idle_base = 325 if (placement == "taskbar" and w_enabled) else 225
                 idle_w = int(idle_base * scale)
                 self._animate_size(idle_w, 28)
+
+        elif state == "NET_SPEED":
+            self.compact_bar.show()
+            self.dashboard_widget.hide()
+            self.shelf_widget.hide()
+            st = getattr(self, "system_stats", {})
+            self.compact_bar.show_net_speed(st.get("net_down_str", "0 KB/s"), st.get("net_up_str", "0 KB/s"))
+            if is_full_tb:
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                full_w = self.compact_bar.update_elastic_layout(max_b)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
+            else:
+                self._animate_size(int(240 * scale), 28)
+
+        elif state == "CPU_RAM":
+            self.compact_bar.show()
+            self.dashboard_widget.hide()
+            self.shelf_widget.hide()
+            st = getattr(self, "system_stats", {})
+            self.compact_bar.show_cpu_ram(st.get("cpu", 0), st.get("ram", 0))
+            if is_full_tb:
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                full_w = self.compact_bar.update_elastic_layout(max_b)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
+            else:
+                self._animate_size(int(215 * scale), 28)
+
+        elif state == "WEATHER":
+            self.compact_bar.show()
+            self.dashboard_widget.hide()
+            self.shelf_widget.hide()
+            wd = getattr(self.compact_bar, "current_weather_data", None) or {}
+            self.compact_bar.show_weather_page(
+                wd.get("temp_str", "22°C"),
+                wd.get("condition", "Partly cloudy"),
+                wd.get("icon", "🌙☁️")
+            )
+            if is_full_tb:
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                full_w = self.compact_bar.update_elastic_layout(max_b)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
+            else:
+                self._animate_size(int(245 * scale), 28)
+
+        elif state == "DATE":
+            self.compact_bar.show()
+            self.dashboard_widget.hide()
+            self.shelf_widget.hide()
+            self.compact_bar.show_date_page()
+            if is_full_tb:
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                full_w = self.compact_bar.update_elastic_layout(max_b)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
+            else:
+                self._animate_size(int(235 * scale), 28)
+
+        elif state == "NOTIFICATIONS":
+            self.compact_bar.show()
+            self.dashboard_widget.hide()
+            self.shelf_widget.hide()
+            nd = getattr(self, "notification_data", {}) or {}
+            self.compact_bar.show_notification_page(
+                nd.get("count", 0),
+                nd.get("display_text", "No notifications")
+            )
+            if is_full_tb:
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                full_w = self.compact_bar.update_elastic_layout(max_b)
+                self.cur_w = full_w
+                self.cur_h = 42
+                self._sync_layout()
+            else:
+                self._animate_size(int(200 * scale), 28)
 
         elif state == "EXPANDED":
             self.compact_bar.hide()
@@ -600,6 +857,8 @@ class NotchWindow(QWidget):
         # Guard: never shrink expanded or shelf panels back to compact height
         if self.current_state in ("EXPANDED", "SHELF") and target_h < 150:
             return
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
         self.size_anim.stop()
         if int(self.cur_w) == target_w and int(self.cur_h) == target_h:
             self._sync_layout()
@@ -622,6 +881,7 @@ class NotchWindow(QWidget):
         self.cur_w = val.width()
         self.cur_h = val.height()
         self._sync_layout()
+        self._update_rotation_timer()
         self.update()
 
     def _sync_layout(self):
@@ -635,12 +895,15 @@ class NotchWindow(QWidget):
         if self.current_state in COMPACT_STATES:
             if is_full_tb:
                 # FULL TASKBAR: Flush across full space till Start button, without pill
-                full_w = int(self.cur_w)
+                max_b = self.settings_service.get("full_taskbar_width", 505)
+                safe_max_w = max(200, max_b - 36)
+                full_w = safe_max_w
                 full_h = int(self.cur_h)
                 x = 0
                 y = int(screen.y() + screen.height() - full_h - 3) # Vertically centered inside taskbar
                 self.setGeometry(x, y, full_w, full_h)
                 self.compact_bar.setGeometry(0, 0, full_w, full_h)
+                self.compact_bar.setFixedWidth(full_w)
                 self._ensure_topmost()
             elif is_bottom:
                 total_w = int(self.cur_w + 2 * self.margin)
@@ -662,6 +925,8 @@ class NotchWindow(QWidget):
                 self.compact_bar.setGeometry(self.margin, 0, self.cur_w, self.cur_h)
 
         elif self.current_state in ("EXPANDED", "SHELF"):
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(16777215, 16777215)
             total_w = int(self.cur_w + 2 * self.margin)
             total_h = int(self.cur_h)
             x = int(screen.x() + (screen.width() - total_w) / 2.0)
@@ -677,6 +942,8 @@ class NotchWindow(QWidget):
                 self.shelf_widget.setGeometry(self.margin, 6, self.cur_w, self.cur_h - 10)
 
     def expand_dashboard(self):
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
         self._last_expand_time = time.time()
         if self.current_state in COMPACT_STATES:
             self.previous_compact_state = self._get_active_fallback_state()
@@ -686,8 +953,12 @@ class NotchWindow(QWidget):
             self.typewriter_timer.stop()
         if hasattr(self, "greeting_hold_timer") and self.greeting_hold_timer.isActive():
             self.greeting_hold_timer.stop()
+        if hasattr(self, "_greeting_startup_timer") and self._greeting_startup_timer.isActive():
+            self._greeting_startup_timer.stop()
         self.is_greeting_active = False
         self._switch_state("EXPANDED")
+        if hasattr(self, "outside_click_timer"):
+            self.outside_click_timer.start(75)
         self.raise_()
         self.activateWindow()
         try:
@@ -700,8 +971,13 @@ class NotchWindow(QWidget):
             pass
 
     def open_shelf(self):
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        self._last_expand_time = time.time()
         if hasattr(self, "rotation_timer") and self.rotation_timer.isActive():
             self.rotation_timer.stop()
+        if hasattr(self, "outside_click_timer") and self.outside_click_timer.isActive():
+            self.outside_click_timer.stop()
         self._switch_state("SHELF")
         self.raise_()
         self.activateWindow()
@@ -714,21 +990,127 @@ class NotchWindow(QWidget):
         self.settings_window.activateWindow()
 
     def collapse(self):
-        target = self.previous_compact_state if self.previous_compact_state != "EXPANDED" else self._get_active_fallback_state()
+        if hasattr(self, "outside_click_timer"):
+            self.outside_click_timer.stop()
+        target = self.previous_compact_state if self.previous_compact_state not in ("EXPANDED", "SHELF") else self._get_active_fallback_state()
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
         self._switch_state(target)
+        self._sync_layout()
+        if self.settings_service.get("placement", "top") in ("taskbar", "full_taskbar"):
+            self._ensure_topmost()
         self._update_rotation_timer()
 
     def _on_pin_toggled(self, pinned: bool):
         self.is_pinned = pinned
 
+    def _tick_topmost_keeper(self):
+        """Periodically re-asserts topmost z-order over Windows Shell_TrayWnd taskbar while compact."""
+        if self.settings_service.get("placement", "top") in ("taskbar", "full_taskbar") and self.current_state in COMPACT_STATES:
+            self._ensure_topmost()
+
+    def _check_expanded_focus_loss(self):
+        """Monitors focus loss and clicks outside while dashboard is open."""
+        if self.current_state != "EXPANDED":
+            if hasattr(self, "outside_click_timer") and self.outside_click_timer.isActive():
+                self.outside_click_timer.stop()
+            return
+
+        if getattr(self, "is_pinned", False):
+            return
+
+        if time.time() - getattr(self, "_last_expand_time", 0.0) < 0.35:
+            return
+
+        if QApplication.activePopupWidget() is not None:
+            return
+
+        # 1. Native Windows Foreground / Focus Check
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            if fg != 0:
+                self_hwnd = int(self.winId())
+                settings_hwnd = (
+                    int(self.settings_window.winId())
+                    if hasattr(self, "settings_window") and self.settings_window.isVisible()
+                    else 0
+                )
+                root_fg = user32.GetAncestor(fg, 2)
+                owner_fg = user32.GetAncestor(fg, 3)
+                is_our_window = (
+                    fg == self_hwnd
+                    or (root_fg != 0 and root_fg == self_hwnd)
+                    or (owner_fg != 0 and owner_fg == self_hwnd)
+                    or (settings_hwnd != 0 and (fg == settings_hwnd or root_fg == settings_hwnd or owner_fg == settings_hwnd))
+                )
+                if not is_our_window:
+                    self.collapse()
+                    return
+        except Exception:
+            pass
+
+        # 2. Native Windows Outside Click Check
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            l_down = (user32.GetAsyncKeyState(0x01) & 0x8000) != 0
+            r_down = (user32.GetAsyncKeyState(0x02) & 0x8000) != 0
+            if l_down or r_down:
+                class POINT(ctypes.Structure):
+                    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+                pt = POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                geom = self.geometry()
+                inside_self = geom.contains(pt.x, pt.y)
+                inside_settings = (
+                    hasattr(self, "settings_window")
+                    and self.settings_window.isVisible()
+                    and self.settings_window.geometry().contains(pt.x, pt.y)
+                )
+                if not inside_self and not inside_settings:
+                    self.collapse()
+                    return
+        except Exception:
+            pass
+
+        # 3. Qt application focus fallback
+        if not self.isActiveWindow():
+            if not (hasattr(self, "settings_window") and self.settings_window.isActiveWindow()):
+                self.collapse()
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
-            # Prevent instant re-collapse if dashboard was expanded within the last 1200ms
-            if time.time() - getattr(self, "_last_expand_time", 0.0) < 1.2:
+            if time.time() - getattr(self, "_last_expand_time", 0.0) < 0.35:
                 return
-            if not self.isActiveWindow() and not self.is_pinned and self.current_state in ("EXPANDED", "SHELF"):
-                if not (hasattr(self, "settings_window") and self.settings_window.isActiveWindow()):
-                    self.collapse()
+            if not getattr(self, "is_pinned", False) and self.current_state == "EXPANDED":
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    fg = user32.GetForegroundWindow()
+                    self_hwnd = int(self.winId())
+                    settings_hwnd = (
+                        int(self.settings_window.winId())
+                        if hasattr(self, "settings_window") and self.settings_window.isVisible()
+                        else 0
+                    )
+                    root_fg = user32.GetAncestor(fg, 2)
+                    owner_fg = user32.GetAncestor(fg, 3)
+                    is_our_window = (
+                        fg == self_hwnd
+                        or (root_fg != 0 and root_fg == self_hwnd)
+                        or (owner_fg != 0 and owner_fg == self_hwnd)
+                        or (settings_hwnd != 0 and (fg == settings_hwnd or root_fg == settings_hwnd or owner_fg == settings_hwnd))
+                    )
+                    if fg != 0 and not is_our_window:
+                        self.collapse()
+                        return
+                except Exception:
+                    pass
+                if not self.isActiveWindow():
+                    if not (hasattr(self, "settings_window") and self.settings_window.isActiveWindow()):
+                        self.collapse()
         super().changeEvent(event)
 
     def enterEvent(self, event):
@@ -744,13 +1126,13 @@ class NotchWindow(QWidget):
     def leaveEvent(self, event):
         self.update()
         if self.settings_service.get("opens_on", "click") == "hover":
-            if self.current_state in ("EXPANDED", "SHELF") and not self.is_pinned:
+            if self.current_state == "EXPANDED" and not self.is_pinned:
                 grace_ms = 850 if self.settings_service.get("placement", "top") in ("taskbar", "full_taskbar") else 350
                 self.hover_leave_timer.start(grace_ms)
         super().leaveEvent(event)
 
     def _on_hover_leave_timeout(self):
-        if not self.underMouse() and not self.is_pinned and self.current_state in ("EXPANDED", "SHELF"):
+        if not self.underMouse() and not self.is_pinned and self.current_state == "EXPANDED":
             self.collapse()
 
     def wheelEvent(self, event):
@@ -1145,18 +1527,28 @@ class NotchWindow(QWidget):
             if self.current_state != "SHELF":
                 self.open_shelf()
 
-    def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        paths = [u.toLocalFile() for u in urls if u.isLocalFile()]
-        if paths:
-            self.shelf_widget.add_paths(paths)
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
             event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            paths = [u.toLocalFile() for u in urls if u.isLocalFile()]
+            if paths:
+                self.shelf_widget.add_paths(paths)
+                if self.current_state != "SHELF":
+                    self.open_shelf()
+                event.acceptProposedAction()
 
     def nativeEvent(self, eventType, message):
         try:
             import ctypes
             from ctypes import wintypes
             msg = wintypes.MSG.from_address(message.__int__())
+            # WM_NCHITTEST = 0x0084
+            if msg.message == 0x0084:
+                return True, 1  # HTCLIENT: delivers all mouse clicks & drag-drops to this window
             # WM_WTSSESSION_CHANGE = 0x02B1
             if msg.message == 0x02B1:
                 # WTS_SESSION_UNLOCK = 0x8, WTS_SESSION_LOGON = 0x5

@@ -27,12 +27,25 @@ DEFAULT_SETTINGS = {
     "shadow_level": "Deep",
     "soft_edge": "Medium",
 
+    # Full Taskbar Width to Start Button barrier
+    "full_taskbar_width": 505,            # width from left screen edge to Start button
+
     # Weather settings (Integrated cloud/weather into pill)
     "weather_enabled": True,              # Integrate weather directly into notch pill
     "weather_temp": 22,
     "weather_condition": "Partly cloudy",
     "weather_unit": "°C",
-    "weather_city": "Local Weather"
+    "weather_city": "Local Weather",
+
+    # Smart Live Pill Rotation settings
+    "rotation_interval_sec": 5,           # 3, 5, 8, 10 seconds
+    "enable_notification_alerts": True,   # Direct 5-second popup toast for new notifications
+    "enable_time_battery_pill": True,     # Time + Weather + Battery pill
+    "enable_net_speed_pill": True,        # Live upload & download speed
+    "enable_cpu_ram_pill": False,         # Disabled per user preference
+    "enable_weather_pill": False,         # Separate weather disabled (already integrated in media/time)
+    "enable_date_pill": False,            # Disabled per user preference
+    "enable_notification_pill": False     # Static bell icon disabled; direct 5s notification alert used
 }
 
 class SettingsService(QObject):

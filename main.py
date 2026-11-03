@@ -16,6 +16,7 @@ from system_service import SystemService
 from settings_service import SettingsService
 from volume_service import VolumeService
 from weather_service import WeatherService
+from notification_service import NotificationService
 from notch_window import NotchWindow
 
 def create_tray_icon():
@@ -48,8 +49,9 @@ def main():
     volume_service.start()
 
     weather_service = WeatherService(settings_service)
+    notification_service = NotificationService(settings_service)
 
-    notch = NotchWindow(media_service, clipboard_service, system_service, settings_service, volume_service, weather_service)
+    notch = NotchWindow(media_service, clipboard_service, system_service, settings_service, volume_service, weather_service, notification_service)
     notch.show()
 
     # System Tray
@@ -81,6 +83,7 @@ def main():
         media_service.stop()
         volume_service.stop()
         system_service.stop()
+        notification_service.stop()
         notch.close()
         app.quit()
     act_quit.triggered.connect(on_quit)
