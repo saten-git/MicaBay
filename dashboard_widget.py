@@ -1,15 +1,18 @@
 import os
 import time
+import subprocess
 from datetime import datetime
 from PySide6.QtCore import Qt, Signal, QTimer, QRectF
 from PySide6.QtGui import QFont, QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QLineEdit, QFrame, QStackedWidget
+    QPushButton, QLineEdit, QFrame, QStackedWidget, QSlider, QSizePolicy
 )
 from circular_gauge import CircularGauge
 from weekly_bars import WeeklyBarsWidget
 from appearance_settings_widget import AppearanceSettingsWidget
+from audio_visualizer import EqualizerBarsWidget
+from battery_glyph import BatteryGlyphWidget
 
 class DashboardWidget(QWidget):
     close_requested = Signal()
@@ -25,11 +28,25 @@ class DashboardWidget(QWidget):
         self.weather_service = weather_service
         self.is_pinned = False
 
+        # Services from parent notch window
+        self.media_service = getattr(parent, "media_service", None)
+        self.volume_service = getattr(parent, "volume_service", None)
+
         # Pomodoro Focus state
         self.focus_seconds = 25 * 60
         self.focus_running = False
         self.focus_timer = QTimer(self)
         self.focus_timer.timeout.connect(self._tick_focus)
+
+        # Stopwatch state
+        self.stopwatch_running = False
+        self.stopwatch_elapsed_ms = 0
+        self.stopwatch_last_time = 0.0
+        self.stopwatch_timer = QTimer(self)
+        self.stopwatch_timer.timeout.connect(self._tick_stopwatch)
+
+        # Microphone mute state
+        self.is_mic_muted = False
 
         self._init_ui()
 
@@ -39,6 +56,14 @@ class DashboardWidget(QWidget):
         if self.weather_service:
             self.weather_service.weather_updated.connect(self._on_weather_updated)
             self._on_weather_updated(self.weather_service.get_data())
+
+        if self.media_service:
+            self.media_service.media_updated.connect(self._on_media_updated)
+        if self.volume_service:
+            self.volume_service.volume_changed.connect(self._on_volume_changed)
+            self.volume_service.mic_mute_changed.connect(self._on_mic_mute_changed)
+            self.is_mic_muted = self.volume_service.is_microphone_muted()
+            self._update_mic_btn_ui(self.is_mic_muted)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -170,57 +195,209 @@ class DashboardWidget(QWidget):
         grid.setSpacing(12)
 
         # -------------------------------------------------------------
-        # CARD 1: SCREEN TIME (Top-Left)
+        # CARD 1: MEDIA CONTROLS & SCREEN TIME (Top-Left)
         # -------------------------------------------------------------
         self.card_screen = self._create_card()
-        cs_layout = QVBoxLayout(self.card_screen)
-        cs_layout.setContentsMargins(14, 12, 14, 12)
-        cs_layout.setSpacing(3)
+        c1_layout = QVBoxLayout(self.card_screen)
+        c1_layout.setContentsMargins(12, 10, 12, 10)
+        c1_layout.setSpacing(4)
 
-        cs_head = QLabel("📊  SCREEN TIME")
-        cs_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
+        c1_header = QHBoxLayout()
+        self.c1_title_lbl = QLabel("🎵  NOW PLAYING")
+        self.c1_title_lbl.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
+
+        self.c1_toggle_btn = QPushButton("Stats ⮂")
+        self.c1_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.c1_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #00d2ff;
+                font-size: 9px;
+                font-weight: 600;
+                border: none;
+                padding: 0 4px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+            }
+        """)
+        self.c1_toggle_btn.clicked.connect(self._toggle_c1_mode)
+
+        c1_header.addWidget(self.c1_title_lbl)
+        c1_header.addStretch()
+        c1_header.addWidget(self.c1_toggle_btn)
+        c1_layout.addLayout(c1_header)
+
+        self.c1_stack = QStackedWidget(self.card_screen)
+
+        # Page 0: Media Player
+        page_media = QWidget()
+        pm_layout = QVBoxLayout(page_media)
+        pm_layout.setContentsMargins(0, 0, 0, 0)
+        pm_layout.setSpacing(6)
+
+        m_info_row = QHBoxLayout()
+        m_info_row.setSpacing(8)
+
+        self.media_thumb_lbl = QLabel("🎵")
+        self.media_thumb_lbl.setFixedSize(32, 32)
+        self.media_thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.media_thumb_lbl.setStyleSheet("background: #222228; border-radius: 6px; font-size: 14px;")
+
+        m_text_col = QVBoxLayout()
+        m_text_col.setSpacing(1)
+        self.media_title_lbl = QLabel("No Media Playing")
+        self.media_title_lbl.setStyleSheet("color: #ffffff; font-size: 12px; font-weight: 700; background: transparent;")
+        self.media_artist_lbl = QLabel("MicaBay Media")
+        self.media_artist_lbl.setStyleSheet("color: #8a8a96; font-size: 10px; background: transparent;")
+        m_text_col.addWidget(self.media_title_lbl)
+        m_text_col.addWidget(self.media_artist_lbl)
+
+        self.media_eq_bars = EqualizerBarsWidget()
+
+        m_info_row.addWidget(self.media_thumb_lbl)
+        m_info_row.addLayout(m_text_col, 1)
+        m_info_row.addWidget(self.media_eq_bars)
+        pm_layout.addLayout(m_info_row)
+
+        # Controls & Volume Row
+        m_ctrl_row = QHBoxLayout()
+        m_ctrl_row.setSpacing(6)
+
+        btn_ctrl_style = """
+            QPushButton {
+                background: #1f1f26;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 11px;
+                font-size: 9px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #2c2c36;
+            }
+        """
+
+        self.media_prev_btn = QPushButton("⏮")
+        self.media_prev_btn.setFixedSize(24, 22)
+        self.media_prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.media_prev_btn.setStyleSheet(btn_ctrl_style)
+        self.media_prev_btn.clicked.connect(lambda: self.media_service.prev_track() if self.media_service else None)
+
+        self.media_play_btn = QPushButton("▶")
+        self.media_play_btn.setFixedSize(26, 22)
+        self.media_play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.media_play_btn.setStyleSheet("""
+            QPushButton {
+                background: #ffffff;
+                color: #0c0c0e;
+                border: none;
+                border-radius: 11px;
+                font-size: 10px;
+                font-weight: 800;
+            }
+            QPushButton:hover {
+                background: #d8d8e0;
+            }
+        """)
+        self.media_play_btn.clicked.connect(lambda: self.media_service.play_pause() if self.media_service else None)
+
+        self.media_next_btn = QPushButton("⏭")
+        self.media_next_btn.setFixedSize(24, 22)
+        self.media_next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.media_next_btn.setStyleSheet(btn_ctrl_style)
+        self.media_next_btn.clicked.connect(lambda: self.media_service.next_track() if self.media_service else None)
+
+        self.vol_mute_btn = QPushButton("🔊")
+        self.vol_mute_btn.setFixedSize(22, 22)
+        self.vol_mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vol_mute_btn.setStyleSheet("background: transparent; border: none; font-size: 11px;")
+        self.vol_mute_btn.clicked.connect(self._toggle_speaker_mute)
+
+        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(70)
+        self.vol_slider.setFixedHeight(16)
+        self.vol_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #24242c;
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #00d2ff;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #ffffff;
+                width: 10px;
+                height: 10px;
+                margin: -3px 0;
+                border-radius: 5px;
+            }
+        """)
+        self.vol_slider.valueChanged.connect(self._on_vol_slider_moved)
+
+        m_ctrl_row.addWidget(self.media_prev_btn)
+        m_ctrl_row.addWidget(self.media_play_btn)
+        m_ctrl_row.addWidget(self.media_next_btn)
+        m_ctrl_row.addWidget(self.vol_mute_btn)
+        m_ctrl_row.addWidget(self.vol_slider)
+        pm_layout.addLayout(m_ctrl_row)
+
+        self.c1_stack.addWidget(page_media)
+
+        # Page 1: Screen Time
+        page_screen = QWidget()
+        ps_layout = QVBoxLayout(page_screen)
+        ps_layout.setContentsMargins(0, 0, 0, 0)
+        ps_layout.setSpacing(2)
 
         self.screen_time_val = QLabel("1h")
-        self.screen_time_val.setStyleSheet("color: #ffffff; font-size: 30px; font-weight: 800; margin-top: 1px;")
+        self.screen_time_val.setStyleSheet("color: #ffffff; font-size: 26px; font-weight: 800;")
 
         app_row = QHBoxLayout()
         app_row.setSpacing(6)
         app_dot = QLabel("🔹")
-        app_dot.setStyleSheet("font-size: 10px; background: transparent;")
+        app_dot.setStyleSheet("font-size: 9px; background: transparent;")
         self.screen_top_app = QLabel("Antigravity IDE · 26m")
-        self.screen_top_app.setStyleSheet("color: #9e9ea8; font-size: 11px; font-weight: 500;")
+        self.screen_top_app.setStyleSheet("color: #9e9ea8; font-size: 10px; font-weight: 500;")
         app_row.addWidget(app_dot)
         app_row.addWidget(self.screen_top_app)
         app_row.addStretch()
 
         self.weekly_bars = WeeklyBarsWidget()
 
-        cs_layout.addWidget(cs_head)
-        cs_layout.addWidget(self.screen_time_val)
-        cs_layout.addLayout(app_row)
-        cs_layout.addStretch()
-        cs_layout.addWidget(self.weekly_bars)
+        ps_layout.addWidget(self.screen_time_val)
+        ps_layout.addLayout(app_row)
+        ps_layout.addStretch()
+        ps_layout.addWidget(self.weekly_bars)
+
+        self.c1_stack.addWidget(page_screen)
+        c1_layout.addWidget(self.c1_stack)
         grid.addWidget(self.card_screen, 0, 0)
 
         # -------------------------------------------------------------
-        # CARD 2: SYSTEM (Top-Middle, Donut Progress Rings)
+        # CARD 2: SYSTEM PERFORMANCE (Top-Middle, 4 Circular Gauges)
         # -------------------------------------------------------------
         self.card_system = self._create_card()
         sys_layout = QVBoxLayout(self.card_system)
-        sys_layout.setContentsMargins(14, 12, 14, 12)
-        sys_layout.setSpacing(4)
+        sys_layout.setContentsMargins(10, 10, 10, 10)
+        sys_layout.setSpacing(3)
 
-        sys_head = QLabel("⚙️  SYSTEM")
+        sys_head = QLabel("⚙️  SYSTEM PERFORMANCE")
         sys_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
 
         gauges_layout = QHBoxLayout()
-        gauges_layout.setSpacing(8)
+        gauges_layout.setSpacing(4)
         gauges_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cpu_gauge = CircularGauge("CPU")
-        self.ram_gauge = CircularGauge("RAM")
-        self.disk_gauge = CircularGauge("DISK")
+        self.cpu_gauge = CircularGauge("CPU", gauge_size=38)
+        self.ram_gauge = CircularGauge("RAM", gauge_size=38)
+        self.gpu_gauge = CircularGauge("GPU", gauge_size=38)
+        self.disk_gauge = CircularGauge("DISK", gauge_size=38)
         gauges_layout.addWidget(self.cpu_gauge)
         gauges_layout.addWidget(self.ram_gauge)
+        gauges_layout.addWidget(self.gpu_gauge)
         gauges_layout.addWidget(self.disk_gauge)
 
         sys_layout.addWidget(sys_head)
@@ -228,79 +405,139 @@ class DashboardWidget(QWidget):
         grid.addWidget(self.card_system, 0, 1)
 
         # -------------------------------------------------------------
-        # CARD 3: WEATHER (Top-Right)
+        # CARD 3: BATTERY & NETWORK (Top-Right)
         # -------------------------------------------------------------
         self.card_weather = self._create_card()
         w_layout = QVBoxLayout(self.card_weather)
-        w_layout.setContentsMargins(14, 12, 14, 12)
-        w_layout.setSpacing(4)
+        w_layout.setContentsMargins(12, 10, 12, 10)
+        w_layout.setSpacing(5)
 
-        w_head = QLabel("🌤️  WEATHER")
+        w_head = QLabel("🔋  POWER & NETWORK")
         w_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
-
-        w_row = QHBoxLayout()
-        w_row.setSpacing(10)
-        w_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-
-        self.weather_icon = QLabel("🌙☁️")
-        self.weather_icon.setStyleSheet("font-size: 26px; background: transparent;")
-
-        w_col = QVBoxLayout()
-        w_col.setSpacing(2)
-        w_col.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-
-        self.weather_title = QLabel("22°C · Partly cloudy")
-        self.weather_title.setStyleSheet("color: #ffffff; font-size: 14px; font-weight: 700;")
-
-        self.weather_sub = QLabel("Local Weather · H: 26° L: 18°")
-        self.weather_sub.setStyleSheet("color: #8a8a96; font-size: 11px;")
-
-        w_col.addWidget(self.weather_title)
-        w_col.addWidget(self.weather_sub)
-
-        w_row.addWidget(self.weather_icon)
-        w_row.addLayout(w_col)
-        w_row.addStretch()
-
         w_layout.addWidget(w_head)
-        w_layout.addSpacing(2)
-        w_layout.addLayout(w_row)
-        w_layout.addStretch()
+
+        # Battery Row
+        bat_row = QHBoxLayout()
+        bat_row.setSpacing(8)
+        self.bat_glyph = BatteryGlyphWidget()
+        self.bat_pct_lbl = QLabel("95% ⚡")
+        self.bat_pct_lbl.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 700;")
+        self.bat_state_lbl = QLabel("Plugged In · Fast Charging")
+        self.bat_state_lbl.setStyleSheet("color: #8a8a96; font-size: 10px;")
+        bat_row.addWidget(self.bat_glyph)
+        bat_row.addWidget(self.bat_pct_lbl)
+        bat_row.addWidget(self.bat_state_lbl)
+        bat_row.addStretch()
+        w_layout.addLayout(bat_row)
+
+        # Network Speeds Row
+        net_row = QHBoxLayout()
+        net_row.setSpacing(8)
+        self.net_down_lbl = QLabel("↓ 0 KB/s")
+        self.net_down_lbl.setStyleSheet("color: #00d2ff; font-size: 12px; font-weight: 700;")
+        self.net_up_lbl = QLabel("↑ 0 KB/s")
+        self.net_up_lbl.setStyleSheet("color: #a0a0ab; font-size: 11px; font-weight: 600;")
+        self.net_sub_lbl = QLabel("Bandwidth I/O")
+        self.net_sub_lbl.setStyleSheet("color: #6a6a75; font-size: 10px;")
+        net_row.addWidget(self.net_down_lbl)
+        net_row.addWidget(self.net_up_lbl)
+        net_row.addWidget(self.net_sub_lbl)
+        net_row.addStretch()
+        w_layout.addLayout(net_row)
+
+        # Weather / Environment Row
+        env_row = QHBoxLayout()
+        env_row.setSpacing(6)
+        self.weather_icon = QLabel("🌙☁️")
+        self.weather_icon.setStyleSheet("font-size: 13px; background: transparent;")
+        self.weather_title = QLabel("22°C · Partly cloudy")
+        self.weather_title.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600;")
+        env_row.addWidget(self.weather_icon)
+        env_row.addWidget(self.weather_title)
+        env_row.addStretch()
+        w_layout.addLayout(env_row)
         grid.addWidget(self.card_weather, 0, 2)
 
         # -------------------------------------------------------------
-        # CARD 4: FOCUS (Bottom-Left)
+        # CARD 4: PRODUCTIVITY TOOLS (Bottom-Left: Pomodoro & Stopwatch)
         # -------------------------------------------------------------
         self.card_focus = self._create_card()
         f_layout = QVBoxLayout(self.card_focus)
-        f_layout.setContentsMargins(14, 12, 14, 12)
+        f_layout.setContentsMargins(14, 10, 14, 10)
         f_layout.setSpacing(4)
 
-        f_head = QLabel("⏱️  FOCUS")
-        f_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
+        f_header = QHBoxLayout()
+        self.prod_title_lbl = QLabel("⏱️  POMODORO")
+        self.prod_title_lbl.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
 
-        f_row = QHBoxLayout()
-        f_info_v = QVBoxLayout()
-        f_info_v.setSpacing(2)
+        self.prod_mode_btn = QPushButton("Stopwatch ⮂")
+        self.prod_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prod_mode_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ff9f0a;
+                font-size: 9px;
+                font-weight: 600;
+                border: none;
+                padding: 0 4px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+            }
+        """)
+        self.prod_mode_btn.clicked.connect(self._toggle_prod_mode)
 
+        f_header.addWidget(self.prod_title_lbl)
+        f_header.addStretch()
+        f_header.addWidget(self.prod_mode_btn)
+        f_layout.addLayout(f_header)
+
+        self.prod_stack = QStackedWidget(self.card_focus)
+
+        # Page 0: Pomodoro
+        page_pomo = QWidget()
+        pomo_layout = QHBoxLayout(page_pomo)
+        pomo_layout.setContentsMargins(0, 0, 0, 0)
+        pomo_layout.setSpacing(8)
+
+        pomo_info_v = QVBoxLayout()
+        pomo_info_v.setSpacing(2)
         self.focus_val = QLabel("25:00")
-        self.focus_val.setStyleSheet("color: #ffffff; font-size: 30px; font-weight: 800;")
-
+        self.focus_val.setStyleSheet("color: #ffffff; font-size: 28px; font-weight: 800;")
         self.focus_state_lbl = QLabel("Ready")
-        self.focus_state_lbl.setStyleSheet("color: #7a7a85; font-size: 12px;")
-        f_info_v.addWidget(self.focus_val)
-        f_info_v.addWidget(self.focus_state_lbl)
+        self.focus_state_lbl.setStyleSheet("color: #7a7a85; font-size: 11px;")
+        pomo_info_v.addWidget(self.focus_val)
+        pomo_info_v.addWidget(self.focus_state_lbl)
 
-        # Circular Play Button (Dark circle with white triangle)
+        pomo_ctrl_row = QHBoxLayout()
+        pomo_ctrl_row.setSpacing(6)
+        self.focus_reset_btn = QPushButton("↺")
+        self.focus_reset_btn.setFixedSize(28, 28)
+        self.focus_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.focus_reset_btn.setStyleSheet("""
+            QPushButton {
+                background: #1f1f26;
+                color: #888892;
+                font-size: 12px;
+                border-radius: 14px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background: #2a2a34;
+            }
+        """)
+        self.focus_reset_btn.clicked.connect(self._reset_focus)
+
         self.focus_play_btn = QPushButton("▶")
-        self.focus_play_btn.setFixedSize(38, 38)
+        self.focus_play_btn.setFixedSize(36, 36)
         self.focus_play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.focus_play_btn.setStyleSheet("""
             QPushButton {
                 background: #25252d;
                 color: #ffffff;
                 font-size: 13px;
-                border-radius: 19px;
+                border-radius: 18px;
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 font-weight: 700;
             }
@@ -309,50 +546,177 @@ class DashboardWidget(QWidget):
             }
         """)
         self.focus_play_btn.clicked.connect(self._toggle_focus)
+        pomo_ctrl_row.addWidget(self.focus_reset_btn)
+        pomo_ctrl_row.addWidget(self.focus_play_btn)
 
-        f_row.addLayout(f_info_v)
-        f_row.addStretch()
-        f_row.addWidget(self.focus_play_btn)
+        pomo_layout.addLayout(pomo_info_v)
+        pomo_layout.addStretch()
+        pomo_layout.addLayout(pomo_ctrl_row)
+        self.prod_stack.addWidget(page_pomo)
 
-        f_layout.addWidget(f_head)
-        f_layout.addStretch()
-        f_layout.addLayout(f_row)
+        # Page 1: Stopwatch
+        page_sw = QWidget()
+        sw_layout = QHBoxLayout(page_sw)
+        sw_layout.setContentsMargins(0, 0, 0, 0)
+        sw_layout.setSpacing(8)
+
+        sw_info_v = QVBoxLayout()
+        sw_info_v.setSpacing(2)
+        self.stopwatch_val = QLabel("00:00.0")
+        self.stopwatch_val.setStyleSheet("color: #ffffff; font-size: 26px; font-weight: 800;")
+        self.stopwatch_state_lbl = QLabel("Stopped")
+        self.stopwatch_state_lbl.setStyleSheet("color: #7a7a85; font-size: 11px;")
+        sw_info_v.addWidget(self.stopwatch_val)
+        sw_info_v.addWidget(self.stopwatch_state_lbl)
+
+        sw_ctrl_row = QHBoxLayout()
+        sw_ctrl_row.setSpacing(6)
+        self.stopwatch_reset_btn = QPushButton("↺")
+        self.stopwatch_reset_btn.setFixedSize(28, 28)
+        self.stopwatch_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stopwatch_reset_btn.setStyleSheet("""
+            QPushButton {
+                background: #1f1f26;
+                color: #888892;
+                font-size: 12px;
+                border-radius: 14px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background: #2a2a34;
+            }
+        """)
+        self.stopwatch_reset_btn.clicked.connect(self._reset_stopwatch)
+
+        self.stopwatch_play_btn = QPushButton("▶")
+        self.stopwatch_play_btn.setFixedSize(36, 36)
+        self.stopwatch_play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stopwatch_play_btn.setStyleSheet("""
+            QPushButton {
+                background: #25252d;
+                color: #ffffff;
+                font-size: 13px;
+                border-radius: 18px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #33333e;
+            }
+        """)
+        self.stopwatch_play_btn.clicked.connect(self._toggle_stopwatch)
+        sw_ctrl_row.addWidget(self.stopwatch_reset_btn)
+        sw_ctrl_row.addWidget(self.stopwatch_play_btn)
+
+        sw_layout.addLayout(sw_info_v)
+        sw_layout.addStretch()
+        sw_layout.addLayout(sw_ctrl_row)
+        self.prod_stack.addWidget(page_sw)
+
+        f_layout.addWidget(self.prod_stack)
         grid.addWidget(self.card_focus, 1, 0)
 
         # -------------------------------------------------------------
-        # CARD 5: CLIPBOARD (Bottom-Middle)
+        # CARD 5: QUICK ACTIONS & APP LAUNCHER (Bottom-Middle)
         # -------------------------------------------------------------
-        self.card_clip = self._create_card()
-        clip_layout = QVBoxLayout(self.card_clip)
-        clip_layout.setContentsMargins(14, 12, 14, 10)
-        clip_layout.setSpacing(6)
+        self.card_actions = self._create_card()
+        act_layout = QVBoxLayout(self.card_actions)
+        act_layout.setContentsMargins(12, 10, 12, 10)
+        act_layout.setSpacing(6)
 
-        clip_head = QLabel("📄  CLIPBOARD")
-        clip_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
-        clip_layout.addWidget(clip_head)
+        act_head = QLabel("⚡  QUICK ACTIONS")
+        act_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
+        act_layout.addWidget(act_head)
 
-        self.clip_list_layout = QVBoxLayout()
-        self.clip_list_layout.setSpacing(6)
-        clip_layout.addLayout(self.clip_list_layout)
-        clip_layout.addStretch()
-        grid.addWidget(self.card_clip, 1, 1)
+        btn_act_style = """
+            QPushButton {
+                background: #1b1b21;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px 6px;
+            }
+            QPushButton:hover {
+                background: #262630;
+                border-color: rgba(255, 255, 255, 0.16);
+            }
+        """
 
-        # Populate initial clipboard samples matching screenshot
-        self._populate_mock_clipboard()
+        # Row 1: System Shortcuts (Snip, Win+V, Mic Mute)
+        r1 = QHBoxLayout()
+        r1.setSpacing(6)
+
+        self.act_snip_btn = QPushButton("📸 Snip")
+        self.act_snip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_snip_btn.setStyleSheet(btn_act_style)
+        self.act_snip_btn.clicked.connect(self._trigger_screenshot)
+
+        self.act_clip_btn = QPushButton("📋 Win+V")
+        self.act_clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_clip_btn.setStyleSheet(btn_act_style)
+        self.act_clip_btn.clicked.connect(self._open_clipboard_win_v)
+
+        self.act_mic_btn = QPushButton("🎙️ Mic")
+        self.act_mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_mic_btn.setStyleSheet(btn_act_style)
+        self.act_mic_btn.clicked.connect(self._toggle_mic_mute)
+
+        r1.addWidget(self.act_snip_btn)
+        r1.addWidget(self.act_clip_btn)
+        r1.addWidget(self.act_mic_btn)
+        act_layout.addLayout(r1)
+
+        # Row 2: Quick Launchers (Calc, Terminal, Tasks, Explorer)
+        r2 = QHBoxLayout()
+        r2.setSpacing(6)
+
+        self.act_calc_btn = QPushButton("🧮 Calc")
+        self.act_calc_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_calc_btn.setStyleSheet(btn_act_style)
+        self.act_calc_btn.clicked.connect(lambda: self._launch_app("calc.exe"))
+
+        self.act_term_btn = QPushButton("⚡ Term")
+        self.act_term_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_term_btn.setStyleSheet(btn_act_style)
+        self.act_term_btn.clicked.connect(lambda: self._launch_app("powershell.exe"))
+
+        self.act_task_btn = QPushButton("📊 Tasks")
+        self.act_task_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_task_btn.setStyleSheet(btn_act_style)
+        self.act_task_btn.clicked.connect(lambda: self._launch_app("taskmgr.exe"))
+
+        self.act_file_btn = QPushButton("📁 Files")
+        self.act_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.act_file_btn.setStyleSheet(btn_act_style)
+        self.act_file_btn.clicked.connect(lambda: self._launch_app("explorer.exe"))
+
+        r2.addWidget(self.act_calc_btn)
+        r2.addWidget(self.act_term_btn)
+        r2.addWidget(self.act_task_btn)
+        r2.addWidget(self.act_file_btn)
+        act_layout.addLayout(r2)
+
+        grid.addWidget(self.card_actions, 1, 1)
 
         # -------------------------------------------------------------
-        # CARD 6: NOTES (Bottom-Right)
+        # CARD 6: CLIPBOARD & NOTES (Bottom-Right)
         # -------------------------------------------------------------
         self.card_notes = self._create_card()
         notes_layout = QVBoxLayout(self.card_notes)
-        notes_layout.setContentsMargins(14, 12, 14, 10)
-        notes_layout.setSpacing(6)
+        notes_layout.setContentsMargins(12, 10, 12, 10)
+        notes_layout.setSpacing(5)
 
-        notes_head = QLabel("🗒️  NOTES")
+        notes_head = QLabel("📄  CLIPBOARD & NOTES")
         notes_head.setStyleSheet("color: #888892; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;")
+        notes_layout.addWidget(notes_head)
 
-        self.note_status = QLabel("No notes yet")
-        self.note_status.setStyleSheet("color: #ffffff; font-size: 14px; font-weight: 600; margin-top: 2px;")
+        self.clip_list_layout = QVBoxLayout()
+        self.clip_list_layout.setSpacing(4)
+        notes_layout.addLayout(self.clip_list_layout)
+        self._populate_mock_clipboard()
 
         note_row = QHBoxLayout()
         note_row.setSpacing(6)
@@ -364,9 +728,9 @@ class DashboardWidget(QWidget):
                 background: #202026;
                 border: 1px solid rgba(255, 255, 255, 0.07);
                 border-radius: 8px;
-                padding: 6px 10px;
+                padding: 4px 8px;
                 color: #ffffff;
-                font-size: 12px;
+                font-size: 11px;
             }
             QLineEdit:focus {
                 border: 1px solid rgba(255, 255, 255, 0.22);
@@ -375,13 +739,13 @@ class DashboardWidget(QWidget):
         self.note_input.returnPressed.connect(self._save_note)
 
         add_btn = QPushButton("+")
-        add_btn.setFixedSize(26, 26)
+        add_btn.setFixedSize(24, 24)
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
                 color: #80808a;
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: 600;
                 border: none;
             }
@@ -393,11 +757,8 @@ class DashboardWidget(QWidget):
 
         note_row.addWidget(self.note_input)
         note_row.addWidget(add_btn)
-
-        notes_layout.addWidget(notes_head)
-        notes_layout.addWidget(self.note_status)
-        notes_layout.addStretch()
         notes_layout.addLayout(note_row)
+
         grid.addWidget(self.card_notes, 1, 2)
 
         self.content_stack.addWidget(self.cards_page)
@@ -537,15 +898,203 @@ class DashboardWidget(QWidget):
             self.note_input.clear()
 
     def _on_stats_updated(self, stats: dict):
-        self.cpu_gauge.set_value(stats["cpu"])
-        self.ram_gauge.set_value(stats["ram"])
-        self.disk_gauge.set_value(stats["disk"])
+        self.cpu_gauge.set_value(stats.get("cpu", 0))
+        self.ram_gauge.set_value(stats.get("ram", 0))
+        self.gpu_gauge.set_value(stats.get("gpu", 0))
+        self.disk_gauge.set_value(stats.get("disk", 0))
 
-        self.screen_time_val.setText(stats["screen_time_total"])
-        self.screen_top_app.setText(stats["top_app_str"])
+        self.screen_time_val.setText(stats.get("screen_time_total", "1h"))
+        self.screen_top_app.setText(stats.get("top_app_str", "Antigravity IDE · 26m"))
 
-        bat = stats["battery"]
-        self.bat_lbl.setText(f"{bat}% 🔋")
+        bat = stats.get("battery", 95)
+        is_charging = stats.get("is_charging", False)
+        self.bat_lbl.setText(f"{bat}% {'⚡' if is_charging else '🔋'}")
+        if hasattr(self, "bat_glyph"):
+            self.bat_glyph.update_battery(bat, is_charging)
+        if hasattr(self, "bat_pct_lbl"):
+            self.bat_pct_lbl.setText(f"{bat}% {'⚡' if is_charging else ''}")
+        if hasattr(self, "bat_state_lbl"):
+            self.bat_state_lbl.setText("Plugged In · Fast Charging" if is_charging else "On Battery")
+
+        if hasattr(self, "net_down_lbl"):
+            self.net_down_lbl.setText(f"↓ {stats.get('net_down_str', '0 KB/s')}")
+        if hasattr(self, "net_up_lbl"):
+            self.net_up_lbl.setText(f"↑ {stats.get('net_up_str', '0 KB/s')}")
+
+    def _toggle_c1_mode(self):
+        curr = self.c1_stack.currentIndex()
+        next_idx = 1 if curr == 0 else 0
+        self.c1_stack.setCurrentIndex(next_idx)
+        if next_idx == 0:
+            self.c1_title_lbl.setText("🎵  NOW PLAYING")
+            self.c1_toggle_btn.setText("Stats ⮂")
+        else:
+            self.c1_title_lbl.setText("📊  SCREEN TIME")
+            self.c1_toggle_btn.setText("Music ⮂")
+
+    def _toggle_prod_mode(self):
+        curr = self.prod_stack.currentIndex()
+        next_idx = 1 if curr == 0 else 0
+        self.prod_stack.setCurrentIndex(next_idx)
+        if next_idx == 0:
+            self.prod_title_lbl.setText("⏱️  POMODORO")
+            self.prod_mode_btn.setText("Stopwatch ⮂")
+        else:
+            self.prod_title_lbl.setText("⏱️  STOPWATCH")
+            self.prod_mode_btn.setText("Pomodoro ⮂")
+
+    def _reset_focus(self):
+        self.focus_running = False
+        self.focus_timer.stop()
+        self.focus_seconds = 25 * 60
+        self.focus_val.setText("25:00")
+        self.focus_state_lbl.setText("Ready")
+        self.focus_play_btn.setText("▶")
+
+    def _toggle_stopwatch(self):
+        self.stopwatch_running = not self.stopwatch_running
+        if self.stopwatch_running:
+            self.stopwatch_last_time = time.time()
+            self.stopwatch_play_btn.setText("⏸")
+            self.stopwatch_state_lbl.setText("Running...")
+            self.stopwatch_timer.start(50)
+        else:
+            self.stopwatch_play_btn.setText("▶")
+            self.stopwatch_state_lbl.setText("Paused")
+            self.stopwatch_timer.stop()
+
+    def _reset_stopwatch(self):
+        self.stopwatch_running = False
+        self.stopwatch_timer.stop()
+        self.stopwatch_elapsed_ms = 0
+        self.stopwatch_val.setText("00:00.0")
+        self.stopwatch_state_lbl.setText("Stopped")
+        self.stopwatch_play_btn.setText("▶")
+
+    def _tick_stopwatch(self):
+        now = time.time()
+        dt_ms = int((now - self.stopwatch_last_time) * 1000)
+        self.stopwatch_last_time = now
+        self.stopwatch_elapsed_ms += dt_ms
+        total_s = self.stopwatch_elapsed_ms // 1000
+        ms = (self.stopwatch_elapsed_ms % 1000) // 100
+        m = total_s // 60
+        s = total_s % 60
+        self.stopwatch_val.setText(f"{m:02d}:{s:02d}.{ms}")
+
+    def _trigger_screenshot(self):
+        try:
+            os.startfile("ms-screenclip:")
+        except Exception:
+            try:
+                subprocess.Popen(["explorer.exe", "ms-screenclip:"])
+            except Exception:
+                pass
+
+    def _open_clipboard_win_v(self):
+        try:
+            import ctypes
+            # Win+V
+            ctypes.windll.user32.keybd_event(0x5B, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x56, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x56, 0, 2, 0)
+            ctypes.windll.user32.keybd_event(0x5B, 0, 2, 0)
+        except Exception:
+            self.shelf_requested.emit()
+
+    def _toggle_mic_mute(self):
+        if self.volume_service:
+            new_state = self.volume_service.toggle_microphone_mute()
+            self.is_mic_muted = new_state
+            self._update_mic_btn_ui(new_state)
+
+    def _update_mic_btn_ui(self, is_muted: bool):
+        if hasattr(self, "act_mic_btn"):
+            if is_muted:
+                self.act_mic_btn.setText("🎙️ Muted")
+                self.act_mic_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(255, 75, 75, 0.22);
+                        border: 1px solid rgba(255, 75, 75, 0.4);
+                        border-radius: 8px;
+                        color: #ff4b4b;
+                        font-size: 11px;
+                        font-weight: 700;
+                        padding: 4px 6px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(255, 75, 75, 0.35);
+                    }
+                """)
+            else:
+                self.act_mic_btn.setText("🎙️ Active")
+                self.act_mic_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #1b1b21;
+                        border: 1px solid rgba(255, 255, 255, 0.08);
+                        border-radius: 8px;
+                        color: #00d2ff;
+                        font-size: 11px;
+                        font-weight: 600;
+                        padding: 4px 6px;
+                    }
+                    QPushButton:hover {
+                        background: #262630;
+                        border-color: rgba(255, 255, 255, 0.16);
+                    }
+                """)
+
+    def _launch_app(self, app_cmd: str):
+        try:
+            subprocess.Popen([app_cmd], shell=True)
+        except Exception:
+            pass
+
+    def _toggle_speaker_mute(self):
+        if self.volume_service:
+            new_mute = self.volume_service.toggle_mute()
+            self.vol_mute_btn.setText("🔇" if new_mute else "🔊")
+
+    def _on_vol_slider_moved(self, val: int):
+        if self.volume_service:
+            self.volume_service.set_volume(val)
+
+    def _on_media_updated(self, data: dict):
+        title = data.get("title", "") or "No Media Playing"
+        artist = data.get("artist", "") or "MicaBay Media"
+        is_playing = data.get("is_playing", False)
+        thumb_bytes = data.get("thumbnail")
+
+        if len(title) > 22:
+            title = title[:20] + "..."
+        if len(artist) > 24:
+            artist = artist[:22] + "..."
+
+        self.media_title_lbl.setText(title)
+        self.media_artist_lbl.setText(artist)
+        self.media_play_btn.setText("⏸" if is_playing else "▶")
+        self.media_eq_bars.set_playing(is_playing)
+
+        if thumb_bytes:
+            pix = QPixmap()
+            pix.loadFromData(thumb_bytes)
+            scaled = pix.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            self.media_thumb_lbl.setPixmap(scaled)
+        else:
+            self.media_thumb_lbl.setText("🎵")
+            self.media_thumb_lbl.setStyleSheet("background: #222228; border-radius: 6px; font-size: 14px;")
+
+    def _on_volume_changed(self, pct: int, is_muted: bool):
+        if hasattr(self, "vol_slider") and not self.vol_slider.isSliderDown():
+            self.vol_slider.blockSignals(True)
+            self.vol_slider.setValue(0 if is_muted else pct)
+            self.vol_slider.blockSignals(False)
+        if hasattr(self, "vol_mute_btn"):
+            self.vol_mute_btn.setText("🔇" if is_muted or pct == 0 else "🔊")
+
+    def _on_mic_mute_changed(self, is_muted: bool):
+        self.is_mic_muted = is_muted
+        self._update_mic_btn_ui(is_muted)
 
     def _on_weather_updated(self, data: dict):
         icon = data.get("icon", "🌙☁️")
@@ -559,7 +1108,8 @@ class DashboardWidget(QWidget):
 
         self.weather_icon.setText(icon)
         self.weather_title.setText(f"{temp} · {cond} ({humid})")
-        self.weather_sub.setText(f"{city} · Humidity {hum_pct}% · H: {h}° L: {l}°")
+        if hasattr(self, "weather_sub") and self.weather_sub:
+            self.weather_sub.setText(f"{city} · Humidity {hum_pct}% · H: {h}° L: {l}°")
 
     def _populate_mock_clipboard(self):
         # Initial clipboard items matching screenshot

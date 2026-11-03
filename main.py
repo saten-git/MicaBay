@@ -80,6 +80,7 @@ def main():
     def on_quit():
         media_service.stop()
         volume_service.stop()
+        system_service.stop()
         notch.close()
         app.quit()
     act_quit.triggered.connect(on_quit)

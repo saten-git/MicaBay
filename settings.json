@@ -24,5 +24,15 @@
   "weather_city": "Local Weather",
   "light_effect": true,
   "weather_humidity_desc": "Humid",
-  "weather_display_mode": "rotate"
+  "weather_display_mode": "rotate",
+  "animation_speed": "smooth",
+  "enable_download_alerts": true,
+  "enable_mic_indicator": true,
+  "enable_screenshot_toast": true,
+  "enable_battery_alerts": true,
+  "enable_volume_hud": true,
+  "enable_gpu_monitor": true,
+  "enable_net_monitor": true,
+  "volume_hud_timeout": 1800,
+  "toast_timeout": 2500
 }

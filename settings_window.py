@@ -458,18 +458,129 @@ class SettingsWindow(QWidget):
         row.addWidget(btn)
         return row
 
+    def _create_toggle_setting(self, title, sub, key, default=True):
+        row = QHBoxLayout()
+        v = QVBoxLayout()
+        v.setSpacing(2)
+        t = QLabel(title)
+        t.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
+        s = QLabel(sub)
+        s.setStyleSheet("color: #8e8e93; font-size: 11px;")
+        v.addWidget(t)
+        v.addWidget(s)
+
+        is_on = self.settings_service.get(key, default)
+        btn = QPushButton("ON" if is_on else "OFF")
+        btn.setFixedSize(50, 26)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_toggle(btn, is_on)
+
+        def on_click():
+            new_val = (btn.text() == "OFF")
+            btn.setText("ON" if new_val else "OFF")
+            self._style_toggle(btn, new_val)
+            self.settings_service.set(key, new_val)
+
+        btn.clicked.connect(on_click)
+
+        row.addLayout(v)
+        row.addStretch()
+        row.addWidget(btn)
+        return row
+
     def _create_live_activities_page(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(28, 22, 28, 24)
-        t = QLabel("Live Activities")
+        layout.setSpacing(14)
+
+        t = QLabel("Live Activities & Animations")
         t.setStyleSheet("color: #ffffff; font-size: 20px; font-weight: 800;")
-        s = QLabel("Live progress for downloads, music playback, timers and sports.")
-        s.setStyleSheet("color: #8e8e93; font-size: 12px;")
+        s = QLabel("Smart contextual alerts, animation speeds and background monitoring.")
+        s.setStyleSheet("color: #8e8e93; font-size: 12px; margin-bottom: 4px;")
         layout.addWidget(t)
         layout.addWidget(s)
+
+        # -------------------------------------------------------------
+        # 1. ANIMATION SPEED
+        # -------------------------------------------------------------
+        layout.addWidget(self._create_section_label("ANIMATION SPEED"))
+        speeds = [
+            ("Snappy", "Crisp 180ms fast response", "snappy"),
+            ("Smooth", "Balanced 240ms natural spring", "smooth"),
+            ("Relaxed", "Gentle 320ms fluid transitions", "relaxed")
+        ]
+        sp_layout = QHBoxLayout()
+        curr_speed = self.settings_service.get("animation_speed", "smooth")
+        self.speed_buttons = {}
+
+        def select_speed(key):
+            self.settings_service.set("animation_speed", key)
+            for k, b in self.speed_buttons.items():
+                active = (k == key)
+                border = "2px solid #ffffff" if active else "1px solid rgba(255, 255, 255, 0.1)"
+                b.setStyleSheet(f"""
+                    QPushButton {{
+                        background: #141418;
+                        color: #ffffff;
+                        border: {border};
+                        border-radius: 10px;
+                        padding: 8px;
+                        text-align: left;
+                        font-size: 11px;
+                    }}
+                """)
+
+        for title, desc, key in speeds:
+            btn = QPushButton(f"{title}\n{desc}")
+            btn.setFixedHeight(70)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            active = (key == curr_speed)
+            border = "2px solid #ffffff" if active else "1px solid rgba(255, 255, 255, 0.1)"
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #141418;
+                    color: #ffffff;
+                    border: {border};
+                    border-radius: 10px;
+                    padding: 8px;
+                    text-align: left;
+                    font-size: 11px;
+                }}
+            """)
+            btn.clicked.connect(lambda _, k=key: select_speed(k))
+            self.speed_buttons[key] = btn
+            sp_layout.addWidget(btn)
+        layout.addLayout(sp_layout)
+
+        layout.addSpacing(6)
+
+        # -------------------------------------------------------------
+        # 2. CONTEXTUAL ACTIVITIES
+        # -------------------------------------------------------------
+        layout.addWidget(self._create_section_label("SMART CONTEXTUAL ALERTS"))
+        layout.addLayout(self._create_toggle_setting("Download Progress", "Show live download transfer speed and progress in notch", "enable_download_alerts", True))
+        layout.addLayout(self._create_toggle_setting("Microphone In-Use Indicator", "Briefly indicate when an application is accessing the microphone", "enable_mic_indicator", True))
+        layout.addLayout(self._create_toggle_setting("Screenshot Confirmation", "Display an island confirmation when a screenshot is captured", "enable_screenshot_toast", True))
+        layout.addLayout(self._create_toggle_setting("Battery & Power Alerts", "Show alerts when charger is connected or battery is low", "enable_battery_alerts", True))
+        layout.addLayout(self._create_toggle_setting("Volume HUD", "Display sleek volume level slider on volume key changes", "enable_volume_hud", True))
+
+        layout.addSpacing(6)
+
+        # -------------------------------------------------------------
+        # 3. SYSTEM HARDWARE SENSORS
+        # -------------------------------------------------------------
+        layout.addWidget(self._create_section_label("HARDWARE SENSORS"))
+        layout.addLayout(self._create_toggle_setting("GPU Utilization Monitoring", "Poll native 3D engine utilization percentage", "enable_gpu_monitor", True))
+        layout.addLayout(self._create_toggle_setting("Network Throughput Monitoring", "Track live upload and download bandwidth rates", "enable_net_monitor", True))
+
         layout.addStretch()
-        return content
+        scroll.setWidget(content)
+        return scroll
 
     def _create_privacy_page(self):
         content = QWidget()

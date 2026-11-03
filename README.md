@@ -66,7 +66,23 @@ Click anywhere on the compact bar to smoothly expand upward into the full dark-t
 * Drag and drop files from Windows Explorer directly onto the notch or taskbar to park them.
 * Drag parked files out into any application, Discord, folder, or browser anytime.
 
-### 8. 🔊 CoreAudio Volume HUD
+### 8. ✍️ Apple-Style Cursive Typewriter Greeting
+* **Contextual Greetings**: Automatically detects time of day and types `"Good morning"`, `"Good afternoon"`, or `"Good evening"`.
+* **Typographic Identity**: Rendered in cursive (`Segoe Script`, `Segoe Print`) in chrome white (`#ffffff`) with a luminous ambient bloom.
+* **Fluid Left-to-Right Typewriter**: Characters write out smoothly from left to right at 100ms per character on startup and Windows logon/unlock (`WM_WTSSESSION_CHANGE`).
+* **5.5-Second Hold**: Stays visible on the taskbar for at least 5.5 seconds before smoothly cross-fading to active downloads/media or clock/battery idle.
+* **Interactive**: Clicking anywhere during the greeting opens the expanded dashboard.
+
+### 9. 📥 Active Download Tracking & Browser Resolver
+* **Real Filename Resolution**: Automatically queries Chrome, Brave, and Edge SQLite download history to resolve temporary `"Unconfirmed <number>"` files into their actual filenames (e.g. `Doraemon Season 9-...zip`).
+* **Live Transfer Metrics**: Displays active download filename, downloaded size in MB, and live transfer speed.
+
+### 10. 🔄 Smart 3-Way Dynamic Rotation
+* When active tasks (media playback or file downloads) are running, MicaBay automatically rotates every 5 seconds across:
+  $$\text{DOWNLOAD} \longleftrightarrow \text{MEDIA} \longleftrightarrow \text{TIME / CLOUD / BATTERY (IDLE)}$$
+* Keeps you fully informed without cluttering your taskbar.
+
+### 11. 🔊 CoreAudio Volume HUD
 * Listens to hardware volume keys and audio slider changes.
 * Pops up a sleek compact volume HUD (`🔊 [========--] 64%`) with automatic 1.8s dismissal.
 

@@ -12,6 +12,15 @@ class MediaService(QObject):
         self._thread = None
         self._running = True
         self._current_session = None
+        self.current_media = {
+            "has_media": False,
+            "app": "",
+            "title": "",
+            "artist": "",
+            "display_text": "",
+            "is_playing": False,
+            "thumbnail": None
+        }
 
     def start(self):
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -74,7 +83,7 @@ class MediaService(QObject):
                         except Exception:
                             pass
 
-                    self.media_updated.emit({
+                    payload = {
                         "has_media": bool(title),
                         "app": source_app,
                         "title": title or "Unknown Track",
@@ -82,9 +91,11 @@ class MediaService(QObject):
                         "display_text": display,
                         "is_playing": is_playing,
                         "thumbnail": thumb_bytes
-                    })
+                    }
+                    self.current_media = payload
+                    self.media_updated.emit(payload)
                 else:
-                    self.media_updated.emit({
+                    payload = {
                         "has_media": False,
                         "app": "",
                         "title": "",
@@ -92,23 +103,56 @@ class MediaService(QObject):
                         "display_text": "",
                         "is_playing": False,
                         "thumbnail": None
-                    })
+                    }
+                    self.current_media = payload
+                    self.media_updated.emit(payload)
             except Exception:
                 pass
 
             await asyncio.sleep(0.8)
 
+    def _send_win32_media_key(self, vk_code: int):
+        try:
+            import ctypes
+            # KEYEVENTF_EXTENDEDKEY = 1, KEYEVENTF_KEYUP = 2
+            ctypes.windll.user32.keybd_event(vk_code, 0, 1, 0)
+            ctypes.windll.user32.keybd_event(vk_code, 0, 1 | 2, 0)
+        except Exception:
+            pass
+
     def play_pause(self):
+        sent = False
         if self._loop and self._current_session:
-            asyncio.run_coroutine_threadsafe(self._current_session.try_toggle_play_pause_async(), self._loop)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._current_session.try_toggle_play_pause_async(), self._loop)
+                # If SMTC is responsive, it will handle it
+                sent = True
+            except Exception:
+                sent = False
+        if not sent:
+            self._send_win32_media_key(0xB3)
 
     def next_track(self):
+        sent = False
         if self._loop and self._current_session:
-            asyncio.run_coroutine_threadsafe(self._current_session.try_skip_next_async(), self._loop)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._current_session.try_skip_next_async(), self._loop)
+                sent = True
+            except Exception:
+                sent = False
+        if not sent:
+            self._send_win32_media_key(0xB0)
 
     def prev_track(self):
+        sent = False
         if self._loop and self._current_session:
-            asyncio.run_coroutine_threadsafe(self._current_session.try_skip_previous_async(), self._loop)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._current_session.try_skip_previous_async(), self._loop)
+                sent = True
+            except Exception:
+                sent = False
+        if not sent:
+            self._send_win32_media_key(0xB1)
 
     def stop(self):
         self._running = False

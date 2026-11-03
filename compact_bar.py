@@ -1,15 +1,15 @@
 from datetime import datetime
-from PySide6.QtCore import Qt, QTimer, QObject, QEvent, Signal
+from PySide6.QtCore import Qt, QTimer, QObject, QEvent, Signal, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QColor, QPainter, QFontMetrics
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QStackedWidget, QSizePolicy
+    QWidget, QHBoxLayout, QLabel, QStackedWidget, QSizePolicy, QPushButton, QGraphicsOpacityEffect, QGraphicsDropShadowEffect
 )
 from audio_visualizer import EqualizerBarsWidget
 from battery_glyph import BatteryGlyphWidget
 from volume_bar import VolumeBarWidget
 
 class CompactClickRedirector(QObject):
-    """Intercepts mouse clicks on any child widget and forwards to expand dashboard."""
+    """Intercepts mouse clicks on any child widget and forwards to expand dashboard unless handled by an interactive control."""
     def __init__(self, compact_bar):
         super().__init__(compact_bar)
         self.compact_bar = compact_bar
@@ -17,6 +17,8 @@ class CompactClickRedirector(QObject):
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Type.MouseButtonPress:
             if ev.button() == Qt.MouseButton.LeftButton:
+                if getattr(obj, "_is_interactive_control", False):
+                    return False
                 notch = self.compact_bar.window()
                 if hasattr(notch, "expand_dashboard"):
                     notch.expand_dashboard()
@@ -26,10 +28,11 @@ class CompactClickRedirector(QObject):
 class CompactBar(QWidget):
     elastic_size_requested = Signal(int)
 
-    def __init__(self, parent=None, weather_service=None):
+    def __init__(self, parent=None, weather_service=None, media_service=None):
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.weather_service = weather_service
+        self.media_service = media_service
         self.placement = "top"
         self.weather_visible = True
         self.raw_media_title = ""
@@ -40,6 +43,14 @@ class CompactBar(QWidget):
         layout.setSpacing(0)
 
         self.stack = QStackedWidget(self)
+
+        # Smooth cross-fade transition effect
+        self._fade_effect = QGraphicsOpacityEffect(self.stack)
+        self.stack.setGraphicsEffect(self._fade_effect)
+        self._fade_anim = QVariantAnimation(self)
+        self._fade_anim.setDuration(130)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim.valueChanged.connect(self._fade_effect.setOpacity)
 
         # -------------------------------------------------------------
         # 1. Media Page (Weather | Thumbnail | Song Title ... | |||)
@@ -148,6 +159,30 @@ class CompactBar(QWidget):
         m_layout.addWidget(self.thumb_lbl)
         m_layout.addWidget(self.title_lbl)
         m_layout.addWidget(self.eq_bars)
+
+        # Subtle interactive Play / Pause button
+        self.media_play_btn = QPushButton("▶")
+        self.media_play_btn.setFixedSize(16, 16)
+        self.media_play_btn._is_interactive_control = True
+        self.media_play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.media_play_btn.setToolTip("Play / Pause")
+        self.media_play_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.12);
+                border: none;
+                border-radius: 8px;
+                color: #ffffff;
+                font-size: 8px;
+                font-weight: 700;
+                padding-left: 1px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.28);
+            }
+        """)
+        self.media_play_btn.clicked.connect(self._on_play_clicked)
+        m_layout.addWidget(self.media_play_btn)
+
         m_layout.addWidget(self.media_clock_widget)
         m_layout.addWidget(self.media_battery_widget)
 
@@ -295,6 +330,121 @@ class CompactBar(QWidget):
         v_layout.addStretch()
         self.stack.addWidget(self.volume_page)
 
+        # -------------------------------------------------------------
+        # 5. Download HUD Page (📥 filename.zip | 12 MB · 1.5 MB/s)
+        # -------------------------------------------------------------
+        self.download_page = QWidget()
+        dl_layout = QHBoxLayout(self.download_page)
+        dl_layout.setContentsMargins(10, 0, 10, 0)
+        dl_layout.setSpacing(7)
+        dl_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+
+        self.dl_icon = QLabel("📥")
+        self.dl_icon.setStyleSheet("font-size: 13px; background: transparent;")
+
+        self.dl_name_lbl = QLabel("Downloading")
+        self.dl_name_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        self.dl_sep = QLabel("|")
+        self.dl_sep.setStyleSheet("color: #4a4a54; font-size: 11px; font-weight: 500;")
+
+        self.dl_info_lbl = QLabel("0 MB/s")
+        self.dl_info_lbl.setStyleSheet("color: #00d2ff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        dl_layout.addStretch()
+        dl_layout.addWidget(self.dl_icon)
+        dl_layout.addWidget(self.dl_name_lbl)
+        dl_layout.addWidget(self.dl_sep)
+        dl_layout.addWidget(self.dl_info_lbl)
+        dl_layout.addStretch()
+        self.stack.addWidget(self.download_page)
+
+        # -------------------------------------------------------------
+        # 6. Microphone HUD Page (🎙️ Microphone Active · Chrome)
+        # -------------------------------------------------------------
+        self.mic_page = QWidget()
+        mic_layout = QHBoxLayout(self.mic_page)
+        mic_layout.setContentsMargins(10, 0, 10, 0)
+        mic_layout.setSpacing(6)
+        mic_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+
+        self.mic_dot = QLabel("●")
+        self.mic_dot.setStyleSheet("color: #00d2ff; font-size: 9px; background: transparent;")
+
+        self.mic_icon = QLabel("🎙️")
+        self.mic_icon.setStyleSheet("font-size: 12px; background: transparent;")
+
+        self.mic_text_lbl = QLabel("Microphone Active")
+        self.mic_text_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        mic_layout.addStretch()
+        mic_layout.addWidget(self.mic_dot)
+        mic_layout.addWidget(self.mic_icon)
+        mic_layout.addWidget(self.mic_text_lbl)
+        mic_layout.addStretch()
+        self.stack.addWidget(self.mic_page)
+
+        # -------------------------------------------------------------
+        # 7. Battery Alert Page (⚡ Charger Connected · 85%)
+        # -------------------------------------------------------------
+        self.battery_alert_page = QWidget()
+        ba_layout = QHBoxLayout(self.battery_alert_page)
+        ba_layout.setContentsMargins(10, 0, 10, 0)
+        ba_layout.setSpacing(6)
+        ba_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter)
+
+        self.ba_icon = QLabel("⚡")
+        self.ba_icon.setStyleSheet("font-size: 13px; background: transparent;")
+
+        self.ba_text_lbl = QLabel("Charger Connected")
+        self.ba_text_lbl.setStyleSheet("color: #ffffff; font-size: 11px; font-weight: 600; background: transparent;")
+
+        ba_layout.addStretch()
+        ba_layout.addWidget(self.ba_icon)
+        ba_layout.addWidget(self.ba_text_lbl)
+        ba_layout.addStretch()
+        self.stack.addWidget(self.battery_alert_page)
+
+        # -------------------------------------------------------------
+        # 8. Apple-style Cursive Greeting Page ("Good morning", etc.)
+        # -------------------------------------------------------------
+        self.greeting_page = QWidget()
+        g_layout = QHBoxLayout(self.greeting_page)
+        g_layout.setContentsMargins(14, 0, 14, 0)
+        g_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        # Left stretch: active in Top / Pill mode; hidden in Full Taskbar mode to flow left-to-right!
+        self.g_left_stretch = QWidget()
+        self.g_left_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        g_layout.addWidget(self.g_left_stretch)
+
+        self.greeting_lbl = QLabel("")
+        self.greeting_lbl.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                font-family: 'Segoe Script', 'Segoe Print', cursive, 'Brush Script MT';
+                font-size: 15px;
+                font-style: italic;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                background: transparent;
+            }
+        """)
+        glow = QGraphicsDropShadowEffect(self.greeting_lbl)
+        glow.setBlurRadius(14)
+        glow.setColor(QColor(255, 255, 255, 220))
+        glow.setOffset(0, 0)
+        self.greeting_lbl.setGraphicsEffect(glow)
+
+        g_layout.addWidget(self.greeting_lbl)
+
+        # Right stretch absorbs extra space
+        self.g_right_stretch = QWidget()
+        self.g_right_stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        g_layout.addWidget(self.g_right_stretch)
+
+        self.stack.addWidget(self.greeting_page)
+
         layout.addWidget(self.stack)
 
         # Install click redirector on stack and all children so clicking ANY pixel opens dashboard
@@ -395,6 +545,8 @@ class CompactBar(QWidget):
         is_full_tb = (placement == "full_taskbar")
         self.m_left_stretch.setVisible(not is_full_tb)
         self.i_left_stretch.setVisible(not is_full_tb)
+        if hasattr(self, "g_left_stretch"):
+            self.g_left_stretch.setVisible(not is_full_tb)
         if not is_full_tb:
             self.media_clock_widget.setVisible(False)
             self.media_battery_widget.setVisible(False)
@@ -533,6 +685,28 @@ class CompactBar(QWidget):
                 optimal_w = min(pad + w_weather + pad, safe_max_w)
                 return self._finish_elastic(optimal_w)
 
+        elif current_widget == self.download_page:
+            w_dl = 26 + self.dl_name_lbl.sizeHint().width() + 12 + self.dl_info_lbl.sizeHint().width() + 24
+            return self._finish_elastic(min(w_dl, safe_max_w))
+
+        elif current_widget == self.mic_page:
+            w_mic = 32 + self.mic_text_lbl.sizeHint().width() + 24
+            return self._finish_elastic(min(w_mic, safe_max_w))
+
+        elif current_widget == self.battery_alert_page:
+            w_ba = 26 + self.ba_text_lbl.sizeHint().width() + 24
+            return self._finish_elastic(min(w_ba, safe_max_w))
+
+        elif current_widget == self.toast_page:
+            w_toast = 24 + self.toast_text.sizeHint().width() + 24
+            return self._finish_elastic(min(w_toast, safe_max_w))
+
+        elif current_widget == self.volume_page:
+            return self._finish_elastic(min(260, safe_max_w))
+
+        elif current_widget == self.greeting_page:
+            return self._finish_elastic(safe_max_w)
+
         return self._finish_elastic(safe_max_w)
 
     def _tick_clock(self):
@@ -541,6 +715,24 @@ class CompactBar(QWidget):
         self.time_lbl.setText(formatted_time)
         if hasattr(self, "media_time_lbl"):
             self.media_time_lbl.setText(formatted_time)
+
+    def _on_play_clicked(self):
+        if getattr(self, "media_service", None):
+            self.media_service.play_pause()
+        else:
+            w = self.window()
+            if hasattr(w, "media_service") and w.media_service:
+                w.media_service.play_pause()
+
+    def _fade_to_page(self, widget):
+        if self.stack.currentWidget() == widget:
+            return
+        self.stack.setCurrentWidget(widget)
+        if hasattr(self, "_fade_anim") and hasattr(self, "_fade_effect"):
+            self._fade_anim.stop()
+            self._fade_anim.setStartValue(0.25)
+            self._fade_anim.setEndValue(1.0)
+            self._fade_anim.start()
 
     def show_media(self, display_text: str, thumb_bytes: bytes, is_playing: bool):
         self.raw_media_title = display_text or "Playing Media"
@@ -563,7 +755,10 @@ class CompactBar(QWidget):
             self.thumb_lbl.setStyleSheet("background: #222228; border-radius: 4px; font-size: 11px;")
 
         self.eq_bars.set_playing(is_playing)
-        self.stack.setCurrentWidget(self.media_page)
+        if hasattr(self, "media_play_btn"):
+            self.media_play_btn.setText("⏸" if is_playing else "▶")
+
+        self._fade_to_page(self.media_page)
 
         if getattr(self, "placement", "top") == "full_taskbar":
             self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
@@ -571,11 +766,33 @@ class CompactBar(QWidget):
     def show_toast(self, icon: str, text: str):
         self.toast_icon.setText(icon)
         self.toast_text.setText(text)
-        self.stack.setCurrentWidget(self.toast_page)
+        self._fade_to_page(self.toast_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
 
     def show_idle(self):
         self._tick_clock()
-        self.stack.setCurrentWidget(self.idle_page)
+        self._fade_to_page(self.idle_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def show_download(self, filename: str, size_mb: float, speed_str: str):
+        self.dl_name_lbl.setText(filename)
+        self.dl_info_lbl.setText(f"{size_mb} MB · {speed_str}")
+        self._fade_to_page(self.download_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def show_mic_status(self, app: str):
+        self.mic_text_lbl.setText(f"Mic Active · {app}" if app else "Microphone Active")
+        self._fade_to_page(self.mic_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
+
+    def show_battery_alert(self, title: str, is_charging: bool, pct: int):
+        self.ba_icon.setText("⚡" if is_charging else "🪫")
+        self.ba_text_lbl.setText(f"{title} · {pct}%")
+        self._fade_to_page(self.battery_alert_page)
         if getattr(self, "placement", "top") == "full_taskbar":
             self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
 
@@ -594,7 +811,9 @@ class CompactBar(QWidget):
             self.vol_pct_lbl.setText(f"{pct}%")
 
         self.vol_bar.set_volume(0 if is_muted else pct, accent_color or QColor(255, 255, 255))
-        self.stack.setCurrentWidget(self.volume_page)
+        self._fade_to_page(self.volume_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
 
     def update_battery(self, pct: int, is_charging: bool):
         self.battery_glyph.update_battery(pct, is_charging)
@@ -605,3 +824,10 @@ class CompactBar(QWidget):
             self.media_battery_glyph.update_battery(pct, is_charging)
             self.media_battery_pct_lbl.setText(str(pct))
             self.media_charge_lbl.setVisible(is_charging)
+
+    def show_greeting(self, text: str):
+        self.greeting_lbl.setText(text)
+        if self.stack.currentWidget() != self.greeting_page:
+            self.stack.setCurrentWidget(self.greeting_page)
+        if getattr(self, "placement", "top") == "full_taskbar":
+            self.update_elastic_layout(getattr(self, "max_boundary_x", 505))
